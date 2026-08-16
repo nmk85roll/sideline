@@ -86,6 +86,10 @@ button:focus-visible{outline:3px solid var(--pass);outline-offset:-3px}
 .d-zs{font-size:10px;font-weight:600;fill:#8E9386}
 .d-lat{font-size:10.5px;font-weight:700;letter-spacing:.6px;fill:#9AA093}
 .d-more{font-size:11px;font-weight:700;fill:var(--mute)}
+.d-tot{font-size:13px;font-weight:800}
+.s-tot{font-size:16px;font-weight:800}
+.d-tot.r,.s-tot.r{fill:var(--run)}
+.d-tot.p,.s-tot.p{fill:#A8530C}
 .s-zl{font-size:15px;font-weight:700;fill:var(--mute)}
 .s-zs{font-size:11px;font-weight:600;fill:#8E9386}
 .s-lat{font-size:11px;font-weight:700;letter-spacing:1px;fill:#9AA093}
@@ -369,13 +373,24 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
   <h2>Review &amp; transcribe</h2>
   <p class="empty" style="padding:0 0 12px">Play each clip back and type what was called. The text saves to the play and exports with the CSV.</p>
   <div id="revOut"></div>
+  <div class="sub" style="margin-top:26px">Games</div>
+  <div class="card">
+    <div class="hdr" style="margin-bottom:10px"><b id="curGame">—</b><span id="curGameMeta"></span></div>
+    <div class="row" style="padding:0">
+      <button class="mini" id="renameGame">Rename</button>
+      <button class="mini solid" id="newGame">Start new game</button>
+    </div>
+  </div>
+  <div id="gameList"></div>
+
   <div class="sub" style="margin-top:26px">Offline</div>
   <p id="swStatus" style="font-size:13px;color:var(--mute);margin:0 0 4px;line-height:1.45">Checking…</p>
 
   <div class="sub" style="margin-top:22px">Start over</div>
   <p style="font-size:13px;color:var(--mute);margin:0 0 9px;line-height:1.45">
-    Clearing removes every play and every clip stored on this device. Export the CSV first if you want to keep it.</p>
-  <button class="mini" id="wipeBtn" style="border-color:#C63B22;color:#C63B22">Clear game</button>
+    Removes every play and clip from the game you are charting now. Other saved games are not touched.
+    Export the CSV first if you want to keep it.</p>
+  <button class="mini" id="wipeBtn" style="border-color:#C63B22;color:#C63B22">Clear this game's plays</button>
 </div></div>
 
 <div class="toast" id="toast"></div>
@@ -387,11 +402,12 @@ var SVGNS='http://www.w3.org/2000/svg';
 /* ---------------- storage ---------------- */
 var db=null;
 function openDB(){return new Promise(function(res,rej){
-  var r=indexedDB.open('sidelinechart',2);
+  var r=indexedDB.open('sidelinechart',3);
   r.onupgradeneeded=function(e){var d=e.target.result;
     if(!d.objectStoreNames.contains('plays'))d.createObjectStore('plays',{keyPath:'id'});
     if(!d.objectStoreNames.contains('clips'))d.createObjectStore('clips');
-    if(!d.objectStoreNames.contains('meta'))d.createObjectStore('meta');};
+    if(!d.objectStoreNames.contains('meta'))d.createObjectStore('meta');
+    if(!d.objectStoreNames.contains('games'))d.createObjectStore('games',{keyPath:'id'});};
   r.onsuccess=function(){db=r.result;res()}; r.onerror=function(){rej(r.error)};});}
 function st(n,m){return db.transaction(n,m).objectStore(n)}
 function dbPut(n,v,k){return new Promise(function(res,rej){var r=k===undefined?st(n,'readwrite').put(v):st(n,'readwrite').put(v,k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
@@ -403,7 +419,8 @@ function dbClear(n){return new Promise(function(res,rej){var r=st(n,'readwrite')
 /* ---------------- state ---------------- */
 var S={q:1,drive:1,down:1,dist:10,hash:'M'};
 var cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
-var plays=[],pendingClip=null,lastId=null;
+var plays=[],allPlays=[],pendingClip=null,lastId=null;
+var GAME=null,games=[];
 function saveState(){dbPut('meta',S,'state').catch(function(){})}
 
 function $(id){return document.getElementById(id)}
@@ -465,7 +482,7 @@ function fieldDiagram(list){
         for(i=0;i<show;i++){
           s+='<circle class="d-dot" cx="'+dx(i).toFixed(1)+'" cy="'+dy(i).toFixed(1)+'" r="6"/>';
         }
-        if(over)s+='<text class="d-more" x="'+dx(PCAP-1).toFixed(1)+'" y="'+(dy(PCAP-1)+4).toFixed(1)+'" text-anchor="middle">+'+(n-show)+'</text>';
+        if(over)s+='<text class="d-tot p" x="'+dx(PCAP-1).toFixed(1)+'" y="'+(dy(PCAP-1)+4).toFixed(1)+'" text-anchor="middle">'+n+'</text>';
       });
     });
 
@@ -493,7 +510,7 @@ function fieldDiagram(list){
           var X=rx(i),y=ry(i);
           s+='<path class="d-tri" d="M '+X.toFixed(1)+' '+(y-TW-3)+' L '+(X+TW).toFixed(1)+' '+(y+5)+' L '+(X-TW).toFixed(1)+' '+(y+5)+' Z"/>';
         }
-        if(rover)s+='<text class="d-more" x="'+rx(cap-1).toFixed(1)+'" y="'+(ry(cap-1)+4)+'" text-anchor="middle">+'+(n-rshow)+'</text>';
+        if(rover)s+='<text class="d-tot r" x="'+rx(cap-1).toFixed(1)+'" y="'+(ry(cap-1)+4)+'" text-anchor="middle">'+n+'</text>';
       });
     });
     s+='<text class="d-cap" x="'+(px+PW/2)+'" y="'+CAP+'" text-anchor="middle">'+P.t.toUpperCase()+'</text>';
@@ -546,7 +563,7 @@ function soloDiagram(list,hf){
       for(i=0;i<show;i++){
         s+='<circle class="d-dot" cx="'+dx(i).toFixed(1)+'" cy="'+dy(i).toFixed(1)+'" r="7"/>';
       }
-      if(over)s+='<text class="s-more" x="'+dx(PCAP-1).toFixed(1)+'" y="'+(dy(PCAP-1)+5).toFixed(1)+'" text-anchor="middle">+'+(n-show)+'</text>';
+      if(over)s+='<text class="s-tot p" x="'+dx(PCAP-1).toFixed(1)+'" y="'+(dy(PCAP-1)+5).toFixed(1)+'" text-anchor="middle">'+n+'</text>';
     });
   });
   BOX.forEach(function(b){
@@ -569,7 +586,7 @@ function soloDiagram(list,hf){
         var X=rx(i),y=ry(i);
         s+='<path class="d-tri" d="M '+X.toFixed(1)+' '+(y-9)+' L '+(X+9).toFixed(1)+' '+(y+5)+' L '+(X-9).toFixed(1)+' '+(y+5)+' Z"/>';
       }
-      if(rover)s+='<text class="s-more" x="'+rx(CAPN-1).toFixed(1)+'" y="'+(ry(CAPN-1)+5)+'" text-anchor="middle">+'+(n-rshow)+'</text>';
+      if(rover)s+='<text class="s-tot r" x="'+rx(CAPN-1).toFixed(1)+'" y="'+(ry(CAPN-1)+5)+'" text-anchor="middle">'+n+'</text>';
     });
   });
   var cap=hf==='L'?'Ball on left hash':hf==='R'?'Ball on right hash':hf==='M'?'Ball in middle':'All hashes — formation shown centered';
@@ -665,14 +682,14 @@ function savePlay(){
 }
 function doSave(){
   var id=Date.now();
-  var p={id:id,q:S.q,drive:S.drive,down:S.down,dist:S.dist,hash:S.hash,
+  var p={id:id,game:GAME.id,q:S.q,drive:S.drive,down:S.down,dist:S.dist,hash:S.hash,
     type:cur.type,side:cur.side,gap:cur.gap,lat:cur.lat,dep:cur.dep,
     tfl:!!cur.flags.tfl,pen:!!cur.flags.pen,to:!!cur.flags.to,punt:!!cur.flags.punt,
     big:!!cur.flags.big,clip:!!pendingClip,clipSize:pendingClip?pendingClip.blob.size:0,call:''};
   var jobs=[dbPut('plays',p)];
   if(pendingClip)jobs.push(dbPut('clips',pendingClip.blob,id));
   Promise.all(jobs).then(function(){
-    plays.push(p);lastId=id;pendingClip=null;
+    plays.push(p);allPlays.push(p);lastId=id;pendingClip=null;
     advance(p);cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
     saveState();render();drawAll();renderAll();
   }).catch(function(){toast('Could not save — try again')});
@@ -689,7 +706,7 @@ $('undoBtn').onclick=function(){
   if(!lastId)return;
   var p=plays[plays.length-1];if(!p||p.id!==lastId)return;
   Promise.all([dbDel('plays',lastId),dbDel('clips',lastId)]).then(function(){
-    plays.pop();
+    plays.pop();allPlays=allPlays.filter(function(x){return x.id!==lastId});
     S.q=p.q;S.drive=p.drive;S.down=p.down;S.dist=p.dist;S.hash=p.hash;
     cur={type:p.type,side:p.side,gap:p.gap,lat:p.lat,dep:p.dep,
       flags:{tfl:p.tfl,pen:p.pen,to:p.to,punt:p.punt,big:p.big}};
@@ -934,6 +951,7 @@ function renderLog(){
     var id=+b.dataset.del;
     Promise.all([dbDel('plays',id),dbDel('clips',id)]).then(function(){
       plays=plays.filter(function(p){return p.id!==id});
+      allPlays=allPlays.filter(function(p){return p.id!==id});
       if(lastId===id)lastId=null;render();drawAll();renderAll();toast('Play deleted');});}});
   each('#logTable select',function(sl){sl.onchange=function(){LF[sl.dataset.lf]=sl.value;renderLog()}});
 }
@@ -959,6 +977,69 @@ function renderReview(){
     o.appendChild(c);});
 }
 
+/* ---------------- games ---------------- */
+function gLabel(g){var d=new Date(g.created);
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}
+function countFor(id){return allPlays.filter(function(p){return p.game===id}).length}
+function renderGames(){
+  if(!GAME)return;
+  $('curGame').textContent=GAME.name;
+  $('curGameMeta').textContent=gLabel(GAME)+' · '+plays.length+(plays.length===1?' play':' plays');
+  var o=$('gameList'),others=games.filter(function(g){return g.id!==GAME.id})
+    .sort(function(a,b){return b.created-a.created});
+  if(!others.length){o.innerHTML='<p class="empty" style="padding:6px 2px">No other games saved yet. Start a new game when this one is over — this one stays here.</p>';return}
+  var h='';
+  others.forEach(function(g){
+    h+='<div class="card" style="padding:10px 12px"><div class="hdr" style="margin-bottom:8px">'+
+      '<b>'+esc(g.name)+'</b><span>'+gLabel(g)+' · '+countFor(g.id)+' plays</span></div>'+
+      '<div class="row" style="padding:0">'+
+      '<button class="mini solid" data-open="'+g.id+'">Open</button>'+
+      '<button class="mini" data-dropg="'+g.id+'" style="border-color:#C63B22;color:#C63B22">Delete</button>'+
+      '</div></div>';
+  });
+  o.innerHTML=h;
+  each('#gameList [data-open]',function(b){b.onclick=function(){switchGame(+b.dataset.open)}});
+  each('#gameList [data-dropg]',function(b){b.onclick=function(){dropGame(+b.dataset.dropg)}});
+}
+function useGame(g){
+  GAME=g;
+  plays=allPlays.filter(function(p){return p.game===g.id}).sort(function(a,b){return a.id-b.id});
+  lastId=null;pendingClip=null;
+  S.down=1;S.dist=10;S.hash='M';S.drive=1;S.q=1;
+  cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
+  dbPut('meta',g.id,'current');saveState();
+  render();drawAll();renderAll();
+}
+function switchGame(id){
+  var g=games.filter(function(x){return x.id===id})[0];
+  if(g){useGame(g);toast('Now charting: '+g.name)}
+}
+function newGame(){
+  var n=prompt('Name this game', 'vs Opponent · '+new Date().toLocaleDateString());
+  if(n===null)return;
+  n=n.trim()||('Game '+(games.length+1));
+  var g={id:Date.now(),name:n,created:Date.now()};
+  dbPut('games',g).then(function(){games.push(g);useGame(g);toast('Started '+n)});
+}
+function dropGame(id){
+  var g=games.filter(function(x){return x.id===id})[0];if(!g)return;
+  if(!confirm('Delete "'+g.name+'" and all of its plays and clips? This cannot be undone.'))return;
+  var doomed=allPlays.filter(function(p){return p.game===id});
+  Promise.all(doomed.map(function(p){return dbDel('plays',p.id)})
+    .concat(doomed.map(function(p){return dbDel('clips',p.id)}))
+    .concat([dbDel('games',id)])).then(function(){
+      allPlays=allPlays.filter(function(p){return p.game!==id});
+      games=games.filter(function(x){return x.id!==id});
+      renderGames();toast('Deleted '+g.name);
+  });
+}
+$('newGame').onclick=newGame;
+$('renameGame').onclick=function(){
+  var n=prompt('Rename this game',GAME.name);
+  if(n===null)return; n=n.trim(); if(!n)return;
+  GAME.name=n;dbPut('games',GAME).then(function(){renderGames();toast('Renamed')});
+};
+
 /* ---------------- export ---------------- */
 $('csvBtn').onclick=function(){
   if(!plays.length){toast('Nothing to export yet');return}
@@ -972,37 +1053,43 @@ $('csvBtn').onclick=function(){
       '"'+String(p.call||'').replace(/"/g,'""')+'"'].join(','));});
   var a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));
-  a.download='sideline-chart.csv';document.body.appendChild(a);a.click();a.remove();
+  a.download=(GAME?GAME.name.replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,''):'sideline')+'.csv';document.body.appendChild(a);a.click();a.remove();
 };
 $('wipeBtn').onclick=function(){
-  if(!confirm('Clear every play and clip from this device? This cannot be undone.'))return;
-  Promise.all([dbClear('plays'),dbClear('clips')]).then(function(){
-    plays=[];lastId=null;S.drive=1;S.down=1;S.dist=10;S.q=1;
-    saveState();render();drawAll();renderAll();toast('Game cleared');});
+  if(!plays.length){toast('Nothing to clear');return}
+  if(!confirm('Clear all '+plays.length+' plays and clips from "'+GAME.name+'"? This cannot be undone.'))return;
+  var doomed=plays.slice();
+  Promise.all(doomed.map(function(p){return dbDel('plays',p.id)})
+    .concat(doomed.map(function(p){return dbDel('clips',p.id)}))).then(function(){
+      allPlays=allPlays.filter(function(p){return p.game!==GAME.id});
+      plays=[];lastId=null;S.drive=1;S.down=1;S.dist=10;S.q=1;
+      saveState();render();drawAll();renderAll();toast('Cleared');
+  });
 };
 
 /* ---------------- boot ---------------- */
-function renderAll(){renderTend();renderLog();renderReview()}
-openDB().then(function(){return Promise.all([dbAll('plays'),dbGet('meta','state')])})
-.then(function(r){
-  plays=(r[0]||[]).sort(function(a,b){return a.id-b.id});
-  if(r[1])S=Object.assign(S,r[1]);
-  render();drawAll();renderAll();
-}).catch(function(){toast('Storage unavailable — private browsing?');render();drawAll()});
-
-/* ---------------- offline install ---------------- */
-function swMsg(t){var e=$('swStatus');if(e)e.textContent=t}
-var SW_READY='Ready. This app opens and runs with no signal — everything is stored on this iPad.';
-if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('sw.js').then(function(){
-    swMsg(navigator.serviceWorker.controller?SW_READY:'Caching now. Reload once more while you have signal to finish.');
-    navigator.serviceWorker.addEventListener('controllerchange',function(){swMsg(SW_READY)});
-  }).catch(function(){
-    swMsg('Not cached. This page has to be opened from an https:// address, not a local file.');
+function renderAll(){renderTend();renderLog();renderReview();renderGames()}
+openDB().then(function(){
+  return Promise.all([dbAll('plays'),dbAll('games'),dbGet('meta','state'),dbGet('meta','current')]);
+}).then(function(r){
+  allPlays=r[0]||[]; games=r[1]||[];
+  if(r[2])S=Object.assign(S,r[2]);
+  var jobs=[];
+  if(!games.length){
+    var g={id:Date.now(),name:'Game 1',created:Date.now()};
+    games=[g]; jobs.push(dbPut('games',g));
+    /* adopt any plays charted before games existed */
+    allPlays.forEach(function(p){ if(!p.game){p.game=g.id; jobs.push(dbPut('plays',p))} });
+  }
+  return Promise.all(jobs).then(function(){
+    var want=r[3], g=games.filter(function(x){return x.id===want})[0];
+    if(!g)g=games.slice().sort(function(a,b){return b.created-a.created})[0];
+    GAME=g;
+    plays=allPlays.filter(function(p){return p.game===g.id}).sort(function(a,b){return a.id-b.id});
+    dbPut('meta',g.id,'current');
+    render();drawAll();renderAll();
   });
-}else{
-  swMsg('Not available here. Open this from an https:// address in Safari.');
-}
+}).catch(function(e){toast('Storage unavailable — private browsing?');render();drawAll()});
 
 window.addEventListener('beforeunload',function(e){if(plays.length){e.preventDefault();e.returnValue=''}});
 </script>
