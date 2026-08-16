@@ -36,6 +36,9 @@ button:focus-visible{outline:3px solid var(--pass);outline-offset:-3px}
 .fromhash{font-family:var(--cond);font-weight:900;font-size:clamp(15px,2.9vw,25px);line-height:.9;
   color:var(--pass);letter-spacing:.02em}
 
+.warn{background:#8C2613;color:#fff;font-size:12px;line-height:1.4;font-weight:600;
+  padding:9px 13px;flex:0 0 auto}
+.warn.hide{display:none}
 .tabs{display:flex;flex:0 0 auto;background:var(--ink);border-top:1px solid #2B3126}
 .tabs button{flex:1;padding:8px 4px 9px;font-size:10.5px;letter-spacing:.13em;
   text-transform:uppercase;color:#8C9184;font-weight:600}
@@ -228,6 +231,8 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
   <button class="undo" id="undoBtn" disabled>Undo</button>
 </div>
 
+<div class="warn hide" id="warnBar"></div>
+
 <div class="tabs">
   <button class="on" data-tab="chart">Input</button>
   <button data-tab="tend">Tendencies</button>
@@ -383,7 +388,10 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
   </div>
   <div id="gameList"></div>
 
-  <div class="sub" style="margin-top:26px">Offline</div>
+  <div class="sub" style="margin-top:26px">Storage</div>
+  <p id="storeStatus" style="font-size:13px;color:var(--mute);margin:0 0 4px;line-height:1.45">Checking…</p>
+
+  <div class="sub" style="margin-top:22px">Offline</div>
   <p id="swStatus" style="font-size:13px;color:var(--mute);margin:0 0 4px;line-height:1.45">Checking…</p>
 
   <div class="sub" style="margin-top:22px">Start over</div>
@@ -400,21 +408,28 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
-var db=null;
-function openDB(){return new Promise(function(res,rej){
-  var r=indexedDB.open('sidelinechart',3);
+var db=null,NOSTORE=false,DBERR='';
+function openDB(){return new Promise(function(res){
+  var r;
+  try{
+    if(!window.indexedDB){NOSTORE=true;DBERR='not available';return res()}
+    r=indexedDB.open('sidelinechart',3);
+  }catch(e){NOSTORE=true;DBERR=e.name||'blocked';return res()}
   r.onupgradeneeded=function(e){var d=e.target.result;
     if(!d.objectStoreNames.contains('plays'))d.createObjectStore('plays',{keyPath:'id'});
     if(!d.objectStoreNames.contains('clips'))d.createObjectStore('clips');
     if(!d.objectStoreNames.contains('meta'))d.createObjectStore('meta');
     if(!d.objectStoreNames.contains('games'))d.createObjectStore('games',{keyPath:'id'});};
-  r.onsuccess=function(){db=r.result;res()}; r.onerror=function(){rej(r.error)};});}
+  r.onsuccess=function(){db=r.result;res()};
+  r.onerror=function(){NOSTORE=true;DBERR=(r.error&&r.error.name)||'blocked';res()};
+  r.onblocked=function(){NOSTORE=true;DBERR='blocked by another tab';res()};});}
 function st(n,m){return db.transaction(n,m).objectStore(n)}
-function dbPut(n,v,k){return new Promise(function(res,rej){var r=k===undefined?st(n,'readwrite').put(v):st(n,'readwrite').put(v,k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
-function dbGet(n,k){return new Promise(function(res,rej){var r=st(n,'readonly').get(k);r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)}})}
-function dbAll(n){return new Promise(function(res,rej){var r=st(n,'readonly').getAll();r.onsuccess=function(){res(r.result||[])};r.onerror=function(){rej(r.error)}})}
-function dbDel(n,k){return new Promise(function(res,rej){var r=st(n,'readwrite').delete(k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
-function dbClear(n){return new Promise(function(res,rej){var r=st(n,'readwrite').clear();r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
+function noStore(v){return Promise.resolve(v)}
+function dbPut(n,v,k){if(NOSTORE)return noStore(undefined);return new Promise(function(res,rej){var r=k===undefined?st(n,'readwrite').put(v):st(n,'readwrite').put(v,k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
+function dbGet(n,k){if(NOSTORE)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readonly').get(k);r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)}})}
+function dbAll(n){if(NOSTORE)return noStore([]);return new Promise(function(res,rej){var r=st(n,'readonly').getAll();r.onsuccess=function(){res(r.result||[])};r.onerror=function(){rej(r.error)}})}
+function dbDel(n,k){if(NOSTORE)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').delete(k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
+function dbClear(n){if(NOSTORE)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').clear();r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
 
 /* ---------------- state ---------------- */
 var S={q:1,drive:1,down:1,dist:10,hash:'M'};
@@ -678,6 +693,7 @@ $('recBtn').onclick=function(){ if(rec)stopRec(); else startRec() };
 /* ---------------- save / advance ---------------- */
 function savePlay(){
   if(!cur.type){toast('Pick a run gap or a pass zone');return}
+  if(!GAME){toast('No game loaded — see the red bar at the top');return}
   Promise.resolve(startP).then(function(){return rec?stopRec():null}).then(doSave);
 }
 function doSave(){
@@ -692,7 +708,7 @@ function doSave(){
     plays.push(p);allPlays.push(p);lastId=id;pendingClip=null;
     advance(p);cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
     saveState();render();drawAll();renderAll();
-  }).catch(function(){toast('Could not save — try again')});
+  }).catch(function(e){toast('Could not save: '+((e&&(e.name||e.message))||'unknown'))});
 }
 function advance(p){
   if(p.to||p.punt){S.drive++;S.down=1;S.dist=10;return}
@@ -982,7 +998,9 @@ function gLabel(g){var d=new Date(g.created);
   return d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}
 function countFor(id){return allPlays.filter(function(p){return p.game===id}).length}
 function renderGames(){
-  if(!GAME)return;
+  showWarn();
+  if(!GAME){$('curGame').textContent='No game loaded';
+    $('curGameMeta').textContent='';$('gameList').innerHTML='';return}
   $('curGame').textContent=GAME.name;
   $('curGameMeta').textContent=gLabel(GAME)+' · '+plays.length+(plays.length===1?' play':' plays');
   var o=$('gameList'),others=games.filter(function(g){return g.id!==GAME.id})
@@ -1089,7 +1107,39 @@ openDB().then(function(){
     dbPut('meta',g.id,'current');
     render();drawAll();renderAll();
   });
-}).catch(function(e){toast('Storage unavailable — private browsing?');render();drawAll()});
+}).catch(function(e){
+  NOSTORE=true;DBERR=(e&&(e.name||e.message))||'error';
+  GAME={id:1,name:'Unsaved game',created:Date.now()};games=[GAME];
+  plays=[];allPlays=[];
+  render();drawAll();renderAll();
+});
+
+/* ---------------- storage + offline status ---------------- */
+function storageNote(){
+  if(!NOSTORE)return 'Saving to this device. Plays and clips survive closing the app.';
+  return 'NOT SAVING. Storage is blocked ('+DBERR+'). That happens when the page is opened as a local file '
+    +'instead of from an https:// address. You can try the app out, but everything is lost on reload.';
+}
+function showWarn(){
+  var b=$('warnBar');
+  if(b){
+    b.classList.toggle('hide',!NOSTORE);
+    if(NOSTORE)b.textContent='Nothing is being saved — open this from an https:// address, not a local file.';
+  }
+  var e=$('storeStatus'); if(e)e.textContent=storageNote();
+}
+function swMsg(t){var e=$('swStatus');if(e)e.textContent=t}
+var SW_READY='Ready. This app opens and runs with no signal — everything is stored on this iPad.';
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').then(function(){
+    swMsg(navigator.serviceWorker.controller?SW_READY:'Caching now. Reload once more while you have signal to finish.');
+    navigator.serviceWorker.addEventListener('controllerchange',function(){swMsg(SW_READY)});
+  }).catch(function(){
+    swMsg('Not cached. This page has to be opened from an https:// address, not a local file.');
+  });
+}else{
+  swMsg('Not available here. Open this from an https:// address in Safari.');
+}
 
 window.addEventListener('beforeunload',function(e){if(plays.length){e.preventDefault();e.returnValue=''}});
 </script>
