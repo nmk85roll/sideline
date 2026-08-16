@@ -409,33 +409,39 @@ var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
 var db=null,NOSTORE=false,DBERR='';
-function openDB(){return new Promise(function(res){
-  var r;
+function openDB(attempt){return new Promise(function(res){
+  var r,done=false,finish=function(){if(!done){done=true;res()}};
+  /* WebKit sometimes returns a request that never fires an event. Never hang on it. */
+  setTimeout(function(){
+    if(done)return;
+    if(!attempt){done=true;openDB(1).then(res);return}
+    NOSTORE=true;DBERR='timed out';finish();
+  },4000);
   try{
-    if(!window.indexedDB){NOSTORE=true;DBERR='not available';return res()}
+    if(!window.indexedDB){NOSTORE=true;DBERR='not available';return finish()}
     r=indexedDB.open('sidelinechart',3);
-  }catch(e){NOSTORE=true;DBERR=e.name||'blocked';return res()}
+  }catch(e){NOSTORE=true;DBERR=e.name||'blocked';return finish()}
   r.onupgradeneeded=function(e){var d=e.target.result;
     if(!d.objectStoreNames.contains('plays'))d.createObjectStore('plays',{keyPath:'id'});
     if(!d.objectStoreNames.contains('clips'))d.createObjectStore('clips');
     if(!d.objectStoreNames.contains('meta'))d.createObjectStore('meta');
     if(!d.objectStoreNames.contains('games'))d.createObjectStore('games',{keyPath:'id'});};
-  r.onsuccess=function(){db=r.result;res()};
-  r.onerror=function(){NOSTORE=true;DBERR=(r.error&&r.error.name)||'blocked';res()};
-  r.onblocked=function(){NOSTORE=true;DBERR='blocked by another tab';res()};});}
+  r.onsuccess=function(){db=r.result;NOSTORE=false;finish()};
+  r.onerror=function(){NOSTORE=true;DBERR=(r.error&&r.error.name)||'blocked';finish()};
+  r.onblocked=function(){NOSTORE=true;DBERR='blocked by another tab';finish()};});}
 function st(n,m){return db.transaction(n,m).objectStore(n)}
 function noStore(v){return Promise.resolve(v)}
-function dbPut(n,v,k){if(NOSTORE)return noStore(undefined);return new Promise(function(res,rej){var r=k===undefined?st(n,'readwrite').put(v):st(n,'readwrite').put(v,k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
-function dbGet(n,k){if(NOSTORE)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readonly').get(k);r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)}})}
-function dbAll(n){if(NOSTORE)return noStore([]);return new Promise(function(res,rej){var r=st(n,'readonly').getAll();r.onsuccess=function(){res(r.result||[])};r.onerror=function(){rej(r.error)}})}
-function dbDel(n,k){if(NOSTORE)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').delete(k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
-function dbClear(n){if(NOSTORE)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').clear();r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
+function dbPut(n,v,k){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=k===undefined?st(n,'readwrite').put(v):st(n,'readwrite').put(v,k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
+function dbGet(n,k){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readonly').get(k);r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)}})}
+function dbAll(n){if(NOSTORE||!db)return noStore([]);return new Promise(function(res,rej){var r=st(n,'readonly').getAll();r.onsuccess=function(){res(r.result||[])};r.onerror=function(){rej(r.error)}})}
+function dbDel(n,k){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').delete(k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
+function dbClear(n){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').clear();r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
 
 /* ---------------- state ---------------- */
 var S={q:1,drive:1,down:1,dist:10,hash:'M'};
 var cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
 var plays=[],allPlays=[],pendingClip=null,lastId=null;
-var GAME=null,games=[];
+var GAME={id:Date.now(),name:'Game 1',created:Date.now()},games=[GAME],provisional=true;
 function saveState(){dbPut('meta',S,'state').catch(function(){})}
 
 function $(id){return document.getElementById(id)}
@@ -1025,7 +1031,7 @@ function useGame(g){
   lastId=null;pendingClip=null;
   S.down=1;S.dist=10;S.hash='M';S.drive=1;S.q=1;
   cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
-  dbPut('meta',g.id,'current');saveState();
+  dbPut('meta',g.id,'current').catch(function(){});saveState();
   render();drawAll();renderAll();
 }
 function switchGame(id){
@@ -1037,7 +1043,8 @@ function newGame(){
   if(n===null)return;
   n=n.trim()||('Game '+(games.length+1));
   var g={id:Date.now(),name:n,created:Date.now()};
-  dbPut('games',g).then(function(){games.push(g);useGame(g);toast('Started '+n)});
+  games.push(g);useGame(g);toast('Started '+n);
+  dbPut('games',g).catch(function(e){toast('Saved locally only: '+(e&&e.name||'error'))});
 }
 function dropGame(id){
   var g=games.filter(function(x){return x.id===id})[0];if(!g)return;
@@ -1053,9 +1060,11 @@ function dropGame(id){
 }
 $('newGame').onclick=newGame;
 $('renameGame').onclick=function(){
+  if(!GAME)return;
   var n=prompt('Rename this game',GAME.name);
   if(n===null)return; n=n.trim(); if(!n)return;
-  GAME.name=n;dbPut('games',GAME).then(function(){renderGames();toast('Renamed')});
+  GAME.name=n;renderGames();toast('Renamed');
+  dbPut('games',GAME).catch(function(e){toast('Could not store name: '+(e&&e.name||'error'))});
 };
 
 /* ---------------- export ---------------- */
@@ -1086,45 +1095,59 @@ $('wipeBtn').onclick=function(){
 };
 
 /* ---------------- boot ---------------- */
-function renderAll(){renderTend();renderLog();renderReview();renderGames()}
+function safe(fn,label){try{fn()}catch(e){console.error(label,e);toast(label+' failed: '+(e&&e.name||'error'))}}
+function renderAll(){safe(renderTend,'Tendencies');safe(renderLog,'Log');safe(renderReview,'Review');safe(renderGames,'Games')}
 openDB().then(function(){
   return Promise.all([dbAll('plays'),dbAll('games'),dbGet('meta','state'),dbGet('meta','current')]);
 }).then(function(r){
-  allPlays=r[0]||[]; games=r[1]||[];
+  var stored=r[1]||[], preboot=plays.slice();
+  allPlays=r[0]||[];
   if(r[2])S=Object.assign(S,r[2]);
   var jobs=[];
-  if(!games.length){
-    var g={id:Date.now(),name:'Game 1',created:Date.now()};
-    games=[g]; jobs.push(dbPut('games',g));
-    /* adopt any plays charted before games existed */
-    allPlays.forEach(function(p){ if(!p.game){p.game=g.id; jobs.push(dbPut('plays',p))} });
-  }
-  return Promise.all(jobs).then(function(){
+
+  if(!stored.length){
+    games=[GAME];
+    jobs.push(dbPut('games',GAME));
+    allPlays.forEach(function(p){ if(!p.game){p.game=GAME.id; jobs.push(dbPut('plays',p))} });
+  } else if(preboot.length){
+    /* charted while the database was still opening — keep them as their own game */
+    games=stored.concat([GAME]);
+    jobs.push(dbPut('games',GAME));
+  } else {
+    games=stored;
     var want=r[3], g=games.filter(function(x){return x.id===want})[0];
     if(!g)g=games.slice().sort(function(a,b){return b.created-a.created})[0];
     GAME=g;
-    plays=allPlays.filter(function(p){return p.game===g.id}).sort(function(a,b){return a.id-b.id});
-    dbPut('meta',g.id,'current');
-    render();drawAll();renderAll();
+  }
+  preboot.forEach(function(p){
+    p.game=GAME.id;
+    if(!allPlays.some(function(x){return x.id===p.id}))allPlays.push(p);
+    jobs.push(dbPut('plays',p));
   });
+  provisional=false;
+  plays=allPlays.filter(function(p){return p.game===GAME.id}).sort(function(a,b){return a.id-b.id});
+  jobs.push(dbPut('meta',GAME.id,'current'));
+  return Promise.all(jobs);
 }).catch(function(e){
   NOSTORE=true;DBERR=(e&&(e.name||e.message))||'error';
-  GAME={id:1,name:'Unsaved game',created:Date.now()};games=[GAME];
-  plays=[];allPlays=[];
+}).then(function(){
+  provisional=false;
   render();drawAll();renderAll();
 });
 
 /* ---------------- storage + offline status ---------------- */
 function storageNote(){
   if(!NOSTORE)return 'Saving to this device. Plays and clips survive closing the app.';
-  return 'NOT SAVING. Storage is blocked ('+DBERR+'). That happens when the page is opened as a local file '
-    +'instead of from an https:// address. You can try the app out, but everything is lost on reload.';
+  if(DBERR==='timed out')return 'NOT SAVING. Storage did not respond. Force-quit the app and reopen it; '
+    +'if that does not clear it, restart the iPad. You can keep charting, but nothing survives a reload.';
+  return 'NOT SAVING ('+DBERR+'). This usually means the page was opened as a local file instead of from '
+    +'an https:// address. You can keep charting, but nothing survives a reload.';
 }
 function showWarn(){
   var b=$('warnBar');
   if(b){
     b.classList.toggle('hide',!NOSTORE);
-    if(NOSTORE)b.textContent='Nothing is being saved — open this from an https:// address, not a local file.';
+    if(NOSTORE)b.textContent='Nothing is being saved — open the Review tab for details.';
   }
   var e=$('storeStatus'); if(e)e.textContent=storageNote();
 }
