@@ -438,7 +438,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v12';
+var BUILD='v13';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1161,8 +1161,14 @@ function txSpawn(){
       txBusy=false;pump();
     }
     else if(m.type==='error'){
-      if(m.where==='run'){txBusy=false;var p2=plays.filter(function(x){return x.id===m.id})[0];
-        if(p2){p2.tx='';p2.txRaw='[failed]';renderAll()} pump()}
+      if(m.where==='run'){
+        txBusy=false;
+        var p2=plays.filter(function(x){return x.id===m.id})[0];
+        if(p2){p2.tx='';p2.txRaw='[failed: '+String(m.msg||'unknown').slice(0,90)+']';
+          dbPut('plays',p2).catch(function(){});renderAll()}
+        txSet('Transcription failed: '+String(m.msg||'unknown').slice(0,140));
+        pump();
+      }
       else{txErr=m.msg;txSet('Could not load the speech model: '+m.msg)}
     }
   };
@@ -1224,7 +1230,7 @@ function pump(){
       pump();return;
     }
     txLast=a;
-    txw.postMessage({type:'run',id:id,audio:a.pcm},[a.pcm.buffer]);
+    txw.postMessage({type:'run',id:id,model:TXMODEL,audio:a.pcm},[a.pcm.buffer]);
   }).catch(function(e){
     txBusy=false;
     var pp=plays.filter(function(x){return x.id===id})[0];

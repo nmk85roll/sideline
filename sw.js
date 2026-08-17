@@ -1,6 +1,6 @@
 /* Sideline Chart — offline cache.
    Bump VERSION whenever index.html changes so iPads pick up the new build. */
-var VERSION = 'sideline-v12';
+var VERSION = 'sideline-v13';
 var SHELL = [
   './',
   './index.html',

@@ -53,19 +53,27 @@ self.onmessage = async (e) => {
   if (m.type === 'run') {
     if (!asr) { self.postMessage({ type: 'error', where: 'run', id: m.id, msg: 'model not loaded' }); return; }
     try {
-      /* Whisper loops forever on silence. Hard limits keep it honest. */
-      const out = await asr(m.audio, {
+      /* English-only (.en) checkpoints reject language/task, so only send them
+         to multilingual models. Everything else guards against runaway loops. */
+      const opts = {
         return_timestamps: false,
-        language: 'en',
-        task: 'transcribe',
-        temperature: 0,
-        do_sample: false,
-        num_beams: 1,
         max_new_tokens: 48,
         no_repeat_ngram_size: 3,
-        repetition_penalty: 1.25,
-        condition_on_previous_text: false
-      });
+        repetition_penalty: 1.2,
+        num_beams: 1,
+        do_sample: false
+      };
+      if (!/\.en$/.test(String(m.model || ''))) { opts.language = 'en'; opts.task = 'transcribe'; }
+
+      let out;
+      try {
+        out = await asr(m.audio, opts);
+      } catch (inner) {
+        /* An option this build of the library dislikes must not kill the feature.
+           Retry once with nothing but the bare minimum. */
+        self.postMessage({ type: 'stage', stage: 'retrying without options: ' + ((inner && inner.message) || inner) });
+        out = await asr(m.audio, { return_timestamps: false });
+      }
       const text = ((out && out.text) || '').trim();
       self.postMessage({ type: 'result', id: m.id, text: text });
     } catch (err) {
