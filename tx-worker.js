@@ -53,7 +53,19 @@ self.onmessage = async (e) => {
   if (m.type === 'run') {
     if (!asr) { self.postMessage({ type: 'error', where: 'run', id: m.id, msg: 'model not loaded' }); return; }
     try {
-      const out = await asr(m.audio, { return_timestamps: false });
+      /* Whisper loops forever on silence. Hard limits keep it honest. */
+      const out = await asr(m.audio, {
+        return_timestamps: false,
+        language: 'en',
+        task: 'transcribe',
+        temperature: 0,
+        do_sample: false,
+        num_beams: 1,
+        max_new_tokens: 48,
+        no_repeat_ngram_size: 3,
+        repetition_penalty: 1.25,
+        condition_on_previous_text: false
+      });
       const text = ((out && out.text) || '').trim();
       self.postMessage({ type: 'result', id: m.id, text: text });
     } catch (err) {

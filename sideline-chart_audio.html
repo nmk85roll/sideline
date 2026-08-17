@@ -388,6 +388,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
     <button class="mini solid" id="txLoadBtn">Download speech model</button>
     <button class="mini" id="txAutoBtn">Auto: off</button>
     <button class="mini" id="txAllBtn">Transcribe pending</button>
+    <button class="mini" id="txModelBtn">Model: tiny (40MB)</button>
   </div>
   <p id="txStatus" style="font-size:12.5px;color:var(--mute);margin:0 0 4px;line-height:1.45">Not started.</p>
 
@@ -467,7 +468,7 @@ function dbDel(n,k){if(NOSTORE||!db)return noStore(undefined);return new Promise
 function dbClear(n){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').clear();r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
 
 /* ---------------- state ---------------- */
-var S={q:1,drive:1,down:1,dist:10,hash:'M',txAuto:false};
+var S={q:1,drive:1,down:1,dist:10,hash:'M',txAuto:false,txModel:''};
 var cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
 var plays=[],allPlays=[],pendingClip=null,lastId=null;
 var GAME={id:Date.now(),name:'Game 1',created:Date.now()},games=[GAME],provisional=true;
@@ -1098,12 +1099,14 @@ function matchCall(raw){
     if(best)out.push(VSPELL[best]||best.toUpperCase());
     else if(w.length>2)out.push('?'+w);
   }
+  if(out.length>14)out=out.slice(0,14);
   return out.join(' ');
 }
 
 /* ---------------- transcription queue ---------------- */
-var TXMODEL='onnx-community/whisper-tiny.en';
-var txw=null,txReady=false,txBusy=false,txQueue=[],txAuto=false,txErr='';
+var TXMODELS=[['onnx-community/whisper-tiny.en','tiny (40MB)'],['onnx-community/whisper-base.en','base (75MB)'],['onnx-community/whisper-small.en','small (250MB)']];
+var TXMODEL=TXMODELS[0][0];
+var txw=null,txReady=false,txBusy=false,txQueue=[],txAuto=false,txErr='',txLast=null;
 function txSet(t){var e=$('txStatus');if(e)e.textContent=t}
 function txSpawn(){
   if(txw)return txw;
@@ -1118,7 +1121,13 @@ function txSpawn(){
     else if(m.type==='ready'){txReady=true;txSet('Ready ('+m.device+'). New plays transcribe automatically.');pump()}
     else if(m.type==='result'){
       var p=plays.filter(function(x){return x.id===m.id})[0];
-      if(p){p.txRaw=m.text;p.tx=matchCall(m.text);dbPut('plays',p).catch(function(){});renderAll()}
+      if(p){
+        p.txRaw=String(m.text||'').slice(0,180);
+        p.tx=matchCall(p.txRaw);
+        dbPut('plays',p).catch(function(){});renderAll();
+      }
+      if(txLast)txSet('Last clip: '+txLast.secs.toFixed(1)+'s of speech in '+txLast.rawSecs.toFixed(1)+
+        's, peak '+txLast.peak.toFixed(2)+'. '+(txQueue.length?txQueue.length+' waiting.':'Done.'));
       txBusy=false;pump();
     }
     else if(m.type==='error'){
@@ -1144,13 +1153,25 @@ function pcmFrom(blob){
       var ch=buf.numberOfChannels,len=buf.length,sr=buf.sampleRate,c,i;
       var mono=new Float32Array(len);
       for(c=0;c<ch;c++){var d=buf.getChannelData(c);for(i=0;i<len;i++)mono[i]+=d[i]/ch}
-      if(sr===16000)return mono;
-      var ratio=sr/16000,n=Math.floor(len/ratio),out=new Float32Array(n),j;
-      for(j=0;j<n;j++){
-        var pos=j*ratio,i0=Math.floor(pos),i1=Math.min(i0+1,len-1),f=pos-i0;
-        out[j]=mono[i0]*(1-f)+mono[i1]*f;
+      var pcm;
+      if(sr===16000)pcm=mono;
+      else{
+        var ratio=sr/16000,n=Math.floor(len/ratio);pcm=new Float32Array(n);
+        for(var j=0;j<n;j++){
+          var pos=j*ratio,i0=Math.floor(pos),i1=Math.min(i0+1,len-1),f=pos-i0;
+          pcm[j]=mono[i0]*(1-f)+mono[i1]*f;
+        }
       }
-      return out;
+      /* Peak level, then trim the dead air either side of the call.
+         Silence is what sends Whisper into a repetition loop. */
+      var peak=0;
+      for(i=0;i<pcm.length;i++){var a=pcm[i]<0?-pcm[i]:pcm[i];if(a>peak)peak=a}
+      var gate=Math.max(0.02,peak*0.08),pad=1600,st=0,en=pcm.length-1;
+      while(st<pcm.length&&Math.abs(pcm[st])<gate)st++;
+      while(en>st&&Math.abs(pcm[en])<gate)en--;
+      st=Math.max(0,st-pad);en=Math.min(pcm.length-1,en+pad);
+      var trimmed=(en>st)?pcm.subarray(st,en+1):pcm;
+      return {pcm:trimmed,peak:peak,secs:trimmed.length/16000,rawSecs:pcm.length/16000};
     });
   });
 }
@@ -1164,8 +1185,16 @@ function pump(){
   dbGet('clips',id).then(function(b){
     if(!b)throw new Error('no clip');
     return pcmFrom(b);
-  }).then(function(pcm){
-    txw.postMessage({type:'run',id:id,audio:pcm},[pcm.buffer]);
+  }).then(function(a){
+    if(a.peak<0.01||a.secs<0.25){
+      txBusy=false;
+      var q=plays.filter(function(x){return x.id===id})[0];
+      if(q){q.tx='';q.txRaw='[silent — peak '+a.peak.toFixed(3)+']';dbPut('plays',q).catch(function(){});renderAll()}
+      txSet('Play '+(plays.indexOf(q)+1)+' was silent (peak '+a.peak.toFixed(3)+'). Check the mic.');
+      pump();return;
+    }
+    txLast=a;
+    txw.postMessage({type:'run',id:id,audio:a.pcm},[a.pcm.buffer]);
   }).catch(function(e){
     txBusy=false;
     var pp=plays.filter(function(x){return x.id===id})[0];
@@ -1193,6 +1222,20 @@ function clipFiles(){
     }).catch(function(){return null});
   })).then(function(f){return f.filter(Boolean)});
 }
+function txModelUI(){
+  var m=TXMODELS.filter(function(x){return x[0]===TXMODEL})[0];
+  $('txModelBtn').textContent='Model: '+(m?m[1]:'?');
+}
+$('txModelBtn').onclick=function(){
+  var i=0,k;
+  for(k=0;k<TXMODELS.length;k++)if(TXMODELS[k][0]===TXMODEL)i=k;
+  TXMODEL=TXMODELS[(i+1)%TXMODELS.length][0];
+  S.txModel=TXMODEL;saveState();txModelUI();
+  /* a different model means a fresh worker */
+  if(txw){try{txw.terminate()}catch(e){}txw=null}
+  txReady=false;txBusy=false;txErr='';txQueue=[];
+  txSet('Switched. Tap Download speech model to fetch it (once, on WiFi).');
+};
 $('txLoadBtn').onclick=function(){txLoad()};
 function txAutoUI(){
   $('txAutoBtn').textContent='Auto: '+(txAuto?'on':'off');
@@ -1396,6 +1439,8 @@ openDB().then(function(){
 }).then(function(){
   provisional=false;
   render();drawAll();renderAll();
+  if(S.txModel)TXMODEL=S.txModel;
+  txModelUI();
   if(S.txAuto){ txAuto=true; txAutoUI(); txLoad(); }
   else txAutoUI();
 });
