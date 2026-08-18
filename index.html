@@ -448,7 +448,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v30';
+var BUILD='v31';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1798,8 +1798,15 @@ if('serviceWorker' in navigator){
     try{reg.update()}catch(e){}
     swMsg(navigator.serviceWorker.controller?SW_READY:'Caching now. Reload once more while you have signal to finish.');
     navigator.serviceWorker.addEventListener('controllerchange',function(){
-      swMsg('A newer build was downloaded. Close and reopen the app to use it.');
-      toast('Update ready — close and reopen');
+      /* A new build just took over. Reload for the user if nothing would be lost,
+         so they never have to launch twice to get the current version. */
+      if(!plays.length&&!rec&&!pendingClip){
+        swMsg('Newer build downloaded — reloading…');
+        setTimeout(function(){location.reload()},400);
+      }else{
+        swMsg('A newer build is ready. Close and reopen when this game is finished.');
+        toast('Update ready — reopen after this game');
+      }
     });
   }).catch(function(){
     swMsg('Not cached. This page has to be opened from an https:// address, not a local file.');
