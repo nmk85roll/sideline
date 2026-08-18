@@ -386,12 +386,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
     <button class="mini solid" id="micTest">Record 3-second test</button>
   </div>
   <p id="micNote" style="font-size:12.5px;color:var(--mute);margin:0 0 8px;line-height:1.5">Not run yet.</p>
-  <p id="micLbl1" style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--mute);
-    font-weight:700;margin:6px 0 3px;display:none">What the microphone recorded</p>
   <audio id="micPlay" controls preload="none" style="width:100%;height:36px;display:none"></audio>
-  <p id="micLbl2" style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--mute);
-    font-weight:700;margin:10px 0 3px;display:none">What the speech model actually hears</p>
-  <audio id="micPlay2" controls preload="none" style="width:100%;height:36px;display:none"></audio>
 
   <div class="sub" style="margin-top:26px">Automatic transcription</div>
   <p style="font-size:13px;color:var(--mute);margin:0 0 9px;line-height:1.5">
@@ -453,7 +448,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v24';
+var BUILD='v25';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1195,10 +1190,10 @@ function matchCall(raw){
 
 /* ---------------- transcription queue ---------------- */
 var TXMODELS=[
-  ['onnx-community/whisper-tiny.en','whisper tiny'],
-  ['onnx-community/whisper-base.en','whisper base'],
-  ['onnx-community/moonshine-tiny-ONNX','moonshine tiny'],
-  ['onnx-community/moonshine-base-ONNX','moonshine base']
+  ['onnx-community/whisper-tiny.en','whisper tiny — known good'],
+  ['onnx-community/whisper-base.en','whisper base — may freeze'],
+  ['onnx-community/moonshine-tiny-ONNX','moonshine tiny — may freeze'],
+  ['onnx-community/moonshine-base-ONNX','moonshine base — may freeze']
 ];
 var TXMODEL=TXMODELS[0][0];
 var TXDTYPES=[['fp32','fp32 — accurate, heavy'],['q8','q8 — light, inaccurate'],['q4f16','q4f16 — often fails on Safari']];
@@ -1458,8 +1453,12 @@ $('txModelBtn').onclick=function(){
 $('micTest').onclick=function(){
   var note=$('micNote');
   note.textContent='Requesting the microphone…';
-  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}})
-  .then(function(st){
+  /* Reuse the app's own microphone session so this both grants permission and
+     leaves the mic open — the first play of the night then records instantly. */
+  var get=(stream&&streamLive(stream))?Promise.resolve(stream)
+    :navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}});
+  get.then(function(st){
+    stream=st;
     var mime=pickMime(),chunks=[],r;
     try{ r=mime?new MediaRecorder(st,{mimeType:mime}):new MediaRecorder(st); }
     catch(e){ note.textContent='MediaRecorder refused to start: '+(e&&e.name||e); return; }
@@ -1468,32 +1467,22 @@ $('micTest').onclick=function(){
     r.onstop=function(){
       var blob=new Blob(chunks,{type:r.mimeType||'audio/mp4'});
       var el=$('micPlay');el.src=URL.createObjectURL(blob);el.style.display='block';
-      $('micLbl1').style.display='block';
       var head='Format '+(r.mimeType||'unknown')+' · file '+Math.round(blob.size/1024)+' KB. ';
       if(blob.size<800){note.textContent=head+'The recorder produced no data at all — the microphone is not reaching the app.';return}
+      head='Microphone permission granted and mic left open, so the first play records instantly. '+head;
       pcmFrom(blob).then(function(a){
-        try{
-          var w=$('micPlay2');w.src=URL.createObjectURL(pcmToWav(a.pcm,16000));
-          w.style.display='block';$('micLbl2').style.display='block';
-        }catch(e){}
         var verdict=a.peak<0.005?'SILENT — the mic is not picking anything up.'
           :a.peak<0.05?'VERY QUIET — hold the iPad closer or speak up; this will transcribe badly.'
           :a.peak<0.15?'Usable, but on the quiet side.':'Good level.';
         note.textContent=head+'Decoded '+a.rawSecs.toFixed(1)+'s, speech portion '+a.secs.toFixed(1)+
-          's, peak '+a.peak.toFixed(3)+', resampled by '+a.how+'. '+verdict+' Compare the two players: if the second one sounds sped up, garbled or silent, the problem is the audio pipeline, not the model.';
+          's, peak '+a.peak.toFixed(3)+', resampled by '+a.how+'. '+verdict+' Play it back above to hear exactly what the iPad captured.';
       }).catch(function(e){
         note.textContent=head+'Recorded, but the audio could not be decoded: '+(e&&e.message||e)+
           '. Playback above will show whether the file itself is good.';
       });
     };
     r.start();
-    setTimeout(function(){
-      try{r.stop()}catch(e){}
-      /* Release the test's capture session, and retire the shared one so the
-         next play recording opens a clean mic. */
-      try{st.getTracks().forEach(function(t){t.stop()})}catch(e){}
-      dropStream();
-    },3000);
+    setTimeout(function(){try{r.stop()}catch(e){}},3000);
   }).catch(function(e){
     note.textContent='Microphone blocked: '+(e&&e.name||e)+
       '. Check Settings > Safari > Microphone, and that the app was opened from its https:// address.';
