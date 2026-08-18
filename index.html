@@ -384,12 +384,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
     Records three seconds and reports exactly what was captured. Use this first if a play comes back silent.</p>
   <div class="row" style="padding:0 0 8px">
     <button class="mini solid" id="micTest">Record 3-second test</button>
-    <button class="mini solid" id="micHoldBtn">Keep mic open: on</button>
   </div>
-  <p style="font-size:12.5px;color:var(--mute);margin:0 0 8px;line-height:1.5">
-    On (default) starts recording instantly, but the iPad's orange microphone indicator stays lit
-    for the whole game even between plays. Off makes the indicator honest — lit only while a clip
-    is recording — at the cost of about a quarter second to open the mic on each tap.</p>
   <p id="micNote" style="font-size:12.5px;color:var(--mute);margin:0 0 8px;line-height:1.5">Not run yet.</p>
   <p id="micLbl1" style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--mute);
     font-weight:700;margin:6px 0 3px;display:none">What the microphone recorded</p>
@@ -408,7 +403,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
     <button class="mini" id="txAutoBtn">Auto: off</button>
     <button class="mini" id="txAllBtn">Transcribe pending</button>
     <button class="mini" id="txModelBtn">Model: tiny (40MB)</button>
-    <button class="mini" id="txDtypeBtn">Precision: fp32</button>
+    <button class="mini" id="txDtypeBtn">Precision: q8</button>
   </div>
   <p id="txStatus" style="font-size:12.5px;color:var(--mute);margin:0 0 4px;line-height:1.45">Not started.</p>
 
@@ -458,7 +453,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v20';
+var BUILD='v21';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -710,7 +705,7 @@ each('#flagRow .chip',function(b){b.onclick=function(){
   cur.flags[b.dataset.f]=!cur.flags[b.dataset.f];render()}});
 
 /* ---------------- audio ---------------- */
-var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true;
+var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true;  /* mic stays open: instant start */
 function pickMime(){var c=['audio/mp4','audio/aac','audio/webm;codecs=opus','audio/webm'];
   for(var i=0;i<c.length;i++){if(window.MediaRecorder&&MediaRecorder.isTypeSupported(c[i]))return c[i]}return''}
 function streamLive(st){
@@ -1187,8 +1182,9 @@ function matchCall(raw){
 var TXMODELS=[['onnx-community/whisper-tiny.en','tiny (40MB)'],['onnx-community/whisper-base.en','base (75MB)'],['onnx-community/whisper-small.en','small (250MB)']];
 var TXMODEL=TXMODELS[1][0];
 var TXDTYPES=[['q8','q8 — smallest'],['fp32','fp32 — most accurate'],['q4f16','q4f16 — GPU balance']];
-var TXDTYPE='fp32';
+var TXDTYPE='q8';
 var txw=null,txReady=false,txBusy=false,txQueue=[],txAuto=false,txErr='',txLast=null;
+var txTimer=null,txStart=0,txCur=0,TXLIMIT=45000;
 function txSet(t){var e=$('txStatus');if(e)e.textContent=t}
 function txSpawn(){
   if(txw)return txw;
@@ -1208,13 +1204,16 @@ function txSpawn(){
         p.tx=matchCall(p.txRaw);
         dbPut('plays',p).catch(function(){});renderAll();
       }
-      if(txLast)txSet('Last clip: '+txLast.secs.toFixed(1)+'s speech in '+txLast.rawSecs.toFixed(1)+
-        's, peak '+txLast.peak.toFixed(2)+', '+txLast.how+'. '+(txQueue.length?txQueue.length+' waiting.':'Done.'));
+      clearTimeout(txTimer);
+      var ms=Date.now()-txStart;
+      if(txLast)txSet('Took '+(ms/1000).toFixed(1)+'s for '+txLast.secs.toFixed(1)+'s of speech (peak '+
+        txLast.peak.toFixed(2)+'). '+(txQueue.length?txQueue.length+' waiting.':'Done.')+
+        (ms>12000?' That is too slow for live use — drop to a smaller model or q8.':''));
       txBusy=false;pump();
     }
     else if(m.type==='error'){
       if(m.where==='run'){
-        txBusy=false;
+        clearTimeout(txTimer);txBusy=false;
         var p2=plays.filter(function(x){return x.id===m.id})[0];
         if(p2){p2.tx='';p2.txRaw='[failed: '+String(m.msg||'unknown').slice(0,90)+']';
           dbPut('plays',p2).catch(function(){});renderAll()}
@@ -1329,7 +1328,16 @@ function pump(){
       txSet('Play '+(plays.indexOf(q)+1)+' had no audible sound (peak '+a.peak.toFixed(4)+'). Run the mic test below.');
       pump();return;
     }
-    txLast=a;
+    txLast=a;txStart=Date.now();txCur=id;
+    clearTimeout(txTimer);
+    txTimer=setTimeout(function(){
+      /* Nothing came back. Assume the engine is wedged, restart it, move on. */
+      var st=plays.filter(function(x){return x.id===txCur})[0];
+      if(st){st.tx='';st.txRaw='[timed out after '+(TXLIMIT/1000)+'s]';dbPut('plays',st).catch(function(){});renderAll()}
+      txSet('Timed out after '+(TXLIMIT/1000)+'s. This model is too heavy for this iPad — '+
+            'try a smaller model or q8 precision.');
+      txReset('');txQueue=[];
+    },TXLIMIT);
     txw.postMessage({type:'run',id:id,model:TXMODEL,audio:a.pcm},[a.pcm.buffer]);
   }).catch(function(e){
     txBusy=false;
@@ -1386,14 +1394,6 @@ $('txModelBtn').onclick=function(){
   /* A different model means a fresh worker. The microphone is unrelated. */
   if(stream&&!streamLive(stream))dropStream();
   txReset('Switched. Tap Download speech model to fetch it (once, on WiFi).');
-};
-function micHoldUI(){
-  $('micHoldBtn').textContent='Keep mic open: '+(micHold?'on':'off');
-  $('micHoldBtn').classList.toggle('solid',micHold);
-}
-$('micHoldBtn').onclick=function(){
-  micHold=!micHold;S.micRelease=!micHold;saveState();micHoldUI();
-  if(!micHold&&!rec)dropStream();
 };
 $('micTest').onclick=function(){
   var note=$('micNote');
@@ -1657,7 +1657,6 @@ openDB().then(function(){
 }).then(function(){
   provisional=false;
   render();drawAll();renderAll();
-  micHold=!S.micRelease;micHoldUI();
   if(S.txModel)TXMODEL=S.txModel;
   if(S.txDtype)TXDTYPE=S.txDtype;
   txModelUI();txDtypeUI();buildMsg();
