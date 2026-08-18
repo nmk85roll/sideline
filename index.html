@@ -379,6 +379,15 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
   <h2>Review &amp; transcribe</h2>
   <p class="empty" style="padding:0 0 12px">Play each clip back and type what was called. The text saves to the play and exports with the CSV.</p>
   <div id="revOut"></div>
+  <div class="sub" style="margin-top:26px">Microphone test</div>
+  <p style="font-size:13px;color:var(--mute);margin:0 0 9px;line-height:1.5">
+    Records three seconds and reports exactly what was captured. Use this first if a play comes back silent.</p>
+  <div class="row" style="padding:0 0 8px">
+    <button class="mini solid" id="micTest">Record 3-second test</button>
+  </div>
+  <p id="micNote" style="font-size:12.5px;color:var(--mute);margin:0 0 8px;line-height:1.5">Not run yet.</p>
+  <audio id="micPlay" controls preload="none" style="width:100%;height:36px;display:none"></audio>
+
   <div class="sub" style="margin-top:26px">Automatic transcription</div>
   <p style="font-size:13px;color:var(--mute);margin:0 0 9px;line-height:1.5">
     Speech-to-text runs on this iPad. The model downloads once (about 40MB) — do that on WiFi,
@@ -438,7 +447,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v13';
+var BUILD='v14';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1202,11 +1211,13 @@ function pcmFrom(blob){
          Silence is what sends Whisper into a repetition loop. */
       var peak=0;
       for(i=0;i<pcm.length;i++){var a=pcm[i]<0?-pcm[i]:pcm[i];if(a>peak)peak=a}
-      var gate=Math.max(0.02,peak*0.08),pad=1600,st=0,en=pcm.length-1;
+      var gate=peak*0.06,pad=4800,st=0,en=pcm.length-1;
       while(st<pcm.length&&Math.abs(pcm[st])<gate)st++;
       while(en>st&&Math.abs(pcm[en])<gate)en--;
       st=Math.max(0,st-pad);en=Math.min(pcm.length-1,en+pad);
       var trimmed=(en>st)?pcm.subarray(st,en+1):pcm;
+      /* Trimming is an optimisation, never a gatekeeper. If it ate the clip, keep the original. */
+      if(trimmed.length<16000*0.4)trimmed=pcm;
       return {pcm:trimmed,peak:peak,secs:trimmed.length/16000,rawSecs:pcm.length/16000};
     });
   });
@@ -1222,11 +1233,11 @@ function pump(){
     if(!b)throw new Error('no clip');
     return pcmFrom(b);
   }).then(function(a){
-    if(a.peak<0.01||a.secs<0.25){
+    if(a.peak<0.005){
       txBusy=false;
       var q=plays.filter(function(x){return x.id===id})[0];
       if(q){q.tx='';q.txRaw='[silent — peak '+a.peak.toFixed(3)+']';dbPut('plays',q).catch(function(){});renderAll()}
-      txSet('Play '+(plays.indexOf(q)+1)+' was silent (peak '+a.peak.toFixed(3)+'). Check the mic.');
+      txSet('Play '+(plays.indexOf(q)+1)+' had no audible sound (peak '+a.peak.toFixed(4)+'). Run the mic test below.');
       pump();return;
     }
     txLast=a;
@@ -1271,6 +1282,39 @@ $('txModelBtn').onclick=function(){
   if(txw){try{txw.terminate()}catch(e){}txw=null}
   txReady=false;txBusy=false;txErr='';txQueue=[];
   txSet('Switched. Tap Download speech model to fetch it (once, on WiFi).');
+};
+$('micTest').onclick=function(){
+  var note=$('micNote');
+  note.textContent='Requesting the microphone…';
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}})
+  .then(function(st){
+    var mime=pickMime(),chunks=[],r;
+    try{ r=mime?new MediaRecorder(st,{mimeType:mime}):new MediaRecorder(st); }
+    catch(e){ note.textContent='MediaRecorder refused to start: '+(e&&e.name||e); return; }
+    note.textContent='Recording 3 seconds — say a call now.';
+    r.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data)};
+    r.onstop=function(){
+      var blob=new Blob(chunks,{type:r.mimeType||'audio/mp4'});
+      var el=$('micPlay');el.src=URL.createObjectURL(blob);el.style.display='block';
+      var head='Format '+(r.mimeType||'unknown')+' · file '+Math.round(blob.size/1024)+' KB. ';
+      if(blob.size<800){note.textContent=head+'The recorder produced no data at all — the microphone is not reaching the app.';return}
+      pcmFrom(blob).then(function(a){
+        var verdict=a.peak<0.005?'SILENT — the mic is not picking anything up.'
+          :a.peak<0.05?'VERY QUIET — hold the iPad closer or speak up; this will transcribe badly.'
+          :a.peak<0.15?'Usable, but on the quiet side.':'Good level.';
+        note.textContent=head+'Decoded '+a.rawSecs.toFixed(1)+'s, speech portion '+a.secs.toFixed(1)+
+          's, peak '+a.peak.toFixed(3)+'. '+verdict+' Play it back above to hear what was captured.';
+      }).catch(function(e){
+        note.textContent=head+'Recorded, but the audio could not be decoded: '+(e&&e.message||e)+
+          '. Playback above will show whether the file itself is good.';
+      });
+    };
+    r.start();
+    setTimeout(function(){try{r.stop()}catch(e){}},3000);
+  }).catch(function(e){
+    note.textContent='Microphone blocked: '+(e&&e.name||e)+
+      '. Check Settings > Safari > Microphone, and that the app was opened from its https:// address.';
+  });
 };
 $('txLoadBtn').onclick=function(){txLoad()};
 function txAutoUI(){
