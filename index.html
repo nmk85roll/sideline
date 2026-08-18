@@ -453,7 +453,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v23';
+var BUILD='v24';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1194,8 +1194,13 @@ function matchCall(raw){
 }
 
 /* ---------------- transcription queue ---------------- */
-var TXMODELS=[['onnx-community/whisper-tiny.en','tiny (40MB)'],['onnx-community/whisper-base.en','base (75MB)'],['onnx-community/whisper-small.en','small (250MB)']];
-var TXMODEL=TXMODELS[1][0];
+var TXMODELS=[
+  ['onnx-community/whisper-tiny.en','whisper tiny'],
+  ['onnx-community/whisper-base.en','whisper base'],
+  ['onnx-community/moonshine-tiny-ONNX','moonshine tiny'],
+  ['onnx-community/moonshine-base-ONNX','moonshine base']
+];
+var TXMODEL=TXMODELS[0][0];
 var TXDTYPES=[['fp32','fp32 — accurate, heavy'],['q8','q8 — light, inaccurate'],['q4f16','q4f16 — often fails on Safari']];
 var TXDTYPE='fp32';
 var txw=null,txReady=false,txBusy=false,txQueue=[],txAuto=false,txErr='',txLast=null;
@@ -1212,7 +1217,9 @@ function txSpawn(){
     var m=e.data||{};
     if(m.type==='progress'){txSet('Downloading speech model… '+m.pct+'%')}
     else if(m.type==='stage'){txSet('Speech model: '+m.stage)}
-    else if(m.type==='ready'){txReady=true;txSet('Ready ('+m.device+'). New plays transcribe automatically.');pump()}
+    else if(m.type==='ready'){txReady=true;txLoading=null;
+      if(txLoadRes){var lr=txLoadRes;txLoadRes=null;lr(true)}
+      txSet('Engine ready ('+m.device+').');pump()}
     else if(m.type==='result'){
       var p=plays.filter(function(x){return x.id===m.id})[0];
       if(p){
@@ -1225,6 +1232,7 @@ function txSpawn(){
       if(txLast)txSet('Took '+(ms/1000).toFixed(1)+'s for '+txLast.secs.toFixed(1)+'s of speech (peak '+
         txLast.peak.toFixed(2)+'). '+(txQueue.length?txQueue.length+' waiting.':'Done.')+
         (ms>12000?' That is too slow for live use — drop to a smaller model or q8.':''));
+      if(txOneShot)releaseEngine();
       txBusy=false;pump();
     }
     else if(m.type==='error'){
@@ -1234,19 +1242,37 @@ function txSpawn(){
         if(p2){p2.tx='';p2.txRaw='[failed: '+String(m.msg||'unknown').slice(0,90)+']';
           dbPut('plays',p2).catch(function(){});renderAll()}
         txSet('Transcription failed: '+String(m.msg||'unknown').slice(0,140));
+        if(txOneShot)releaseEngine();
         pump();
       }
-      else{txErr=m.msg;txSet('Could not load the speech model: '+m.msg)}
+      else{txErr=m.msg;txSet('Could not load the speech model: '+m.msg);
+        if(txLoadRes){var lr2=txLoadRes;txLoadRes=null;lr2(false)}txLoading=null}
     }
   };
   return txw;
 }
+var txLoading=null,txLoadRes=null,txOneShot=true;
 function txLoad(){
-  var w=txSpawn(); if(!w)return;
-  txSet('Starting…'); w.postMessage({type:'load',model:TXMODEL,dtype:TXDTYPE});
+  ensureEngine().then(function(ok){
+    if(ok)txSet('Engine ready. Clips transcribe when the sideline goes quiet.');
+  });
 }
-/* Wrap the exact samples handed to the model as a playable 16k WAV.
-   If this sounds wrong, the problem is upstream of the model. */
+/* The model is loaded per clip and released afterwards. Keeping it resident is
+   what makes Safari run out of memory and reload the whole app. */
+function ensureEngine(){
+  if(txReady)return Promise.resolve(true);
+  if(txLoading)return txLoading;
+  var w=txSpawn();
+  if(!w)return Promise.resolve(false);
+  txSet('Loading speech engine…');
+  txLoading=new Promise(function(res){txLoadRes=res});
+  w.postMessage({type:'load',model:TXMODEL,dtype:TXDTYPE});
+  return txLoading;
+}
+function releaseEngine(){
+  if(txw){try{txw.terminate()}catch(e){}txw=null}
+  txReady=false;txLoading=null;txLoadRes=null;
+}
 function pcmToWav(pcm,rate){
   rate=rate||16000;
   var n=pcm.length,buf=new ArrayBuffer(44+n*2),v=new DataView(buf),i;
@@ -1333,16 +1359,23 @@ document.addEventListener('pointerdown',function(){
   if(idleTimer){clearTimeout(idleTimer);idleTimer=null}
 },true);
 function pump(){
-  if(!txReady||txBusy||!txQueue.length)return;
+  if(txBusy||!txQueue.length)return;
   var quiet=Date.now()-lastTouch;
   if(quiet<IDLE){
     /* Still being used. Come back when the sideline goes quiet for a moment. */
     if(!idleTimer)idleTimer=setTimeout(function(){idleTimer=null;pump()},IDLE-quiet+50);
     return;
   }
-  var id=txQueue.shift(),p=plays.filter(function(x){return x.id===id})[0];
-  if(!p||!p.clip){pump();return}
+  var id=txQueue[0],p=plays.filter(function(x){return x.id===id})[0];
+  if(!p||!p.clip){txQueue.shift();pump();return}
   txBusy=true;
+  ensureEngine().then(function(ok){
+    if(!ok){txBusy=false;return}
+    txQueue.shift();
+    runClip(id,p);
+  });
+}
+function runClip(id,p){
   txSet('Transcribing play '+(plays.indexOf(p)+1)+'… ('+txQueue.length+' waiting)');
   dbGet('clips',id).then(function(b){
     if(!b)throw new Error('no clip');
@@ -1402,8 +1435,8 @@ function txDtypeUI(){
   $('txDtypeBtn').textContent='Precision: '+(d?d[1]:TXDTYPE);
 }
 function txReset(msg){
-  if(txw){try{txw.terminate()}catch(e){}txw=null}
-  txReady=false;txBusy=false;txErr='';txQueue=[];
+  releaseEngine();
+  txBusy=false;txErr='';txQueue=[];
   txSet(msg);
 }
 $('txDtypeBtn').onclick=function(){
