@@ -214,6 +214,9 @@ table.grid .rawtx{font-size:11px;color:#9AA093;font-style:italic}
 .card .hdr span{font-size:12px;color:var(--mute)}
 .mini{padding:9px 13px;border-radius:4px;border:1.5px solid var(--line);background:#F7F8F5;font-size:13px;font-weight:700}
 .mini.solid{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.mini.tnow{background:var(--ink);color:var(--paper);border-color:var(--ink);
+  padding:6px 9px;font-size:11.5px;white-space:nowrap;margin-bottom:4px}
+.mini.tnow:disabled{background:#E7E9E3;color:var(--mute);border-color:var(--line);opacity:1}
 input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit;border:1.5px solid var(--line);
   border-radius:4px;background:var(--white);color:var(--ink);user-select:text;-webkit-user-select:text}
 .toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);background:var(--ink);color:var(--paper);
@@ -390,13 +393,14 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
   <div class="sub" style="margin-top:26px">Automatic transcription</div>
   <p style="font-size:13px;color:var(--mute);margin:0 0 9px;line-height:1.5">
-    Speech-to-text runs on this iPad. The model downloads once (about 40MB) — do that on WiFi,
-    then it works with no signal. Each saved play is transcribed in the background and matched
-    against your call sheet.</p>
+    <b>Experimental on this device.</b> Speech-to-text runs entirely on the iPad, but the speech
+    model is close to the memory ceiling here — running several clips in a row can make Safari
+    reload the app. Transcribe one clip at a time, and leave Auto off unless you have proven it
+    holds. Nothing is lost if it fails: your audio is safe and the Shortcuts route below always works.</p>
   <div class="row" style="padding:0 0 8px">
     <button class="mini solid" id="txLoadBtn">Download speech model</button>
     <button class="mini" id="txAutoBtn">Auto: off</button>
-    <button class="mini" id="txAllBtn">Transcribe pending</button>
+    <button class="mini" id="txAllBtn">Transcribe ONE clip</button>
     <button class="mini" id="txModelBtn">Model: tiny (40MB)</button>
     <button class="mini" id="txDtypeBtn">Precision: fp32</button>
   </div>
@@ -448,7 +452,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v33';
+var BUILD='v35';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1108,8 +1112,11 @@ function renderLog(){
       '<td>'+(fdirName(p)||'<span class="dash">—</span>')+'</td>'+
       '<td>'+zoneOf(p)+'</td><td>'+resShort(p)+'</td>'+
       '<td><span class="led '+(clipOk(p)?'ok':'no')+'"></span></td>'+
-      '<td class="callcell"><input type="text" data-tx="'+p.id+'" value="'+esc(p.tx||'')+
-        '" placeholder="—" style="width:100%;min-width:150px;padding:5px 6px;font-size:13px;font-weight:600">'+
+      '<td class="callcell">'+
+        (p.clip&&!p.tx?'<button class="mini tnow" data-tnow="'+p.id+'"'+(txLock()?' disabled':'')+'>'+
+          (txBusyOn===p.id?'Working…':txLock()?txLockLabel():'Transcribe now')+'</button>':'')+
+        (p.tx||!p.clip?'<input type="text" data-tx="'+p.id+'" value="'+esc(p.tx||'')+
+          '" placeholder="—" style="width:100%;min-width:150px;padding:5px 6px;font-size:13px;font-weight:600">':'')+
         (p.txRaw&&p.txRaw!==p.tx?'<br><span class="rawtx">heard: '+esc(p.txRaw)+'</span>':'')+'</td>'+
       '<td><button class="mini" data-del="'+p.id+'" style="padding:4px 8px;font-size:11px">Delete</button></td></tr>';
   });
@@ -1122,6 +1129,13 @@ function renderLog(){
       allPlays=allPlays.filter(function(p){return p.id!==id});
       if(lastId===id)lastId=null;render();drawAll();renderAll();toast('Play deleted');});}});
   each('#logTable select',function(sl){sl.onchange=function(){LF[sl.dataset.lf]=sl.value;renderLog()}});
+  each('#logTable [data-tnow]',function(b){b.onclick=function(){
+    if(txLock())return;
+    var id=+b.dataset.tnow;
+    txCoolUntil=0;lastTouch=0;txQueue=[id];
+    b.disabled=true;b.textContent='Working…';
+    pump();
+  }});
   each('#logTable [data-tx]',function(inp){inp.onchange=function(){
     var p=plays.filter(function(x){return x.id===+inp.dataset.tx})[0];
     if(!p)return; p.tx=inp.value.trim();
@@ -1290,7 +1304,7 @@ function txSpawn(){
         txLast.peak.toFixed(2)+'). '+(txQueue.length?txQueue.length+' waiting.':'Done.')+
         (ms>12000?' That is too slow for live use — drop to a smaller model or q8.':''));
       if(txOneShot)releaseEngine();
-      txBusy=false;pump();
+      txBusy=false;txBusyOn=0;pump();txRelock();
     }
     else if(m.type==='error'){
       if(m.where==='run'){
@@ -1300,7 +1314,7 @@ function txSpawn(){
           dbPut('plays',p2).catch(function(){});renderAll()}
         txSet('Transcription failed: '+String(m.msg||'unknown').slice(0,140));
         if(txOneShot)releaseEngine();
-        pump();
+        txBusyOn=0;pump();txRelock();
       }
       else{txErr=m.msg;txSet('Could not load the speech model: '+m.msg);
         if(txLoadRes){var lr2=txLoadRes;txLoadRes=null;lr2(false)}txLoading=null}
@@ -1312,7 +1326,22 @@ var txLoading=null,txLoadRes=null,txOneShot=true;
 /* Releasing the engine frees the memory, but Safari does not hand it back
    instantly. Loading the next model straight away stacks two allocations and
    the tab gets killed. Wait between clips. */
-var TXCOOL=4000,txCoolUntil=0,coolTimer=null;
+var TXCOOL=4000,txCoolUntil=0,coolTimer=null,txBusyOn=0;
+/* One clip at a time, always. While one is running — or while the iPad is being
+   given a moment to reclaim its memory — every Transcribe button is locked. */
+function txLock(){ return txBusy || Date.now()<txCoolUntil }
+function txLockLabel(){
+  var left=Math.ceil((txCoolUntil-Date.now())/1000);
+  if(left>0)return 'Ready in '+left+'s';
+  return txBusy?'Wait…':'Transcribe now';
+}
+function txRelock(){
+  if(typeof renderLog!=='function')return;
+  if($('logTable'))renderLog();
+  if(txLock()&&!coolTimer){
+    coolTimer=setTimeout(function(){coolTimer=null;txRelock()},600);
+  }
+}
 function txLoad(){
   txCoolUntil=0;
   ensureEngine().then(function(ok){
@@ -1438,7 +1467,7 @@ function pump(){
   }
   var id=txQueue[0],p=plays.filter(function(x){return x.id===id})[0];
   if(!p||!p.clip){txQueue.shift();pump();return}
-  txBusy=true;
+  txBusy=true;txBusyOn=id;txRelock();
   ensureEngine().then(function(ok){
     if(!ok){txBusy=false;return}
     txQueue.shift();
@@ -1580,9 +1609,13 @@ $('txAutoBtn').onclick=function(){
 $('txAllBtn').onclick=function(){
   var q=txPending();
   if(!q.length){txSet('Nothing pending — every clip already has text.');return}
-  if(!txReady&&!txErr)txLoad();
-  q.forEach(enqueue);
-  txSet('Queued '+q.length+' clip'+(q.length===1?'':'s')+'.');
+  if(txBusy){txSet('Already working on one. Wait for it to finish.');return}
+  /* Deliberately one at a time. Chaining clips is what runs the iPad out of
+     memory and reloads the app, so this never queues more than a single clip. */
+  txCoolUntil=0;lastTouch=0;
+  txQueue=[q[0]];
+  txSet('Transcribing 1 of '+q.length+' remaining. Tap again for the next one.');
+  pump();
 };
 $('expAudio').onclick=function(){
   $('tinNote').textContent='Gathering clips…';
