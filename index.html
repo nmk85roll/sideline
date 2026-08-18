@@ -228,7 +228,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 <div class="strip">
   <div class="dd" id="ddText">1ST &amp; 10</div>
   <div class="fromhash" id="hashText">FROM THE MIDDLE</div>
-  <div class="meta">Q<span id="qText">1</span> · Drive <span id="drvText">1</span><br><b id="cntText">0 plays</b></div>
+  <div class="meta"><b id="cntText">0 plays</b></div>
   <button class="undo" id="undoBtn" disabled>Undo</button>
 </div>
 
@@ -448,7 +448,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v25';
+var BUILD='v26';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -681,7 +681,6 @@ function drawDiagrams(){ $('playDiag').innerHTML=fieldDiagram(plays) }
 function render(){
   $('ddText').textContent=ordinal(S.down)+' & '+S.dist+(S.dist>=11?'+':'');
   $('hashText').textContent={L:'FROM THE LEFT HASH',M:'FROM THE MIDDLE',R:'FROM THE RIGHT HASH'}[S.hash];
-  $('qText').textContent=S.q; $('drvText').textContent=S.drive;
   $('cntText').textContent=plays.length+(plays.length===1?' play':' plays');
   each('#downOpts .chip',function(b){b.classList.toggle('on',+b.dataset.d===S.down)});
   each('#hashOpts .chip',function(b){b.classList.toggle('on',b.dataset.h===S.hash)});
@@ -792,7 +791,7 @@ function doSave(){
   var p={id:id,game:GAME.id,q:S.q,drive:S.drive,down:S.down,dist:S.dist,hash:S.hash,
     type:cur.type,side:cur.side,gap:cur.gap,lat:cur.lat,dep:cur.dep,
     tfl:!!cur.flags.tfl,pen:!!cur.flags.pen,to:!!cur.flags.to,punt:!!cur.flags.punt,
-    big:!!cur.flags.big,clip:!!pendingClip,clipSize:pendingClip?pendingClip.blob.size:0,call:''};
+    big:!!cur.flags.big,clip:!!pendingClip,clipSize:pendingClip?pendingClip.blob.size:0};
   var jobs=[dbPut('plays',p)];
   if(pendingClip)jobs.push(dbPut('clips',pendingClip.blob,id));
   Promise.all(jobs).then(function(){
@@ -1027,18 +1026,18 @@ function renderLog(){
   }
   var pair=function(v){return [v,v]};
   var h='<thead><tr><th style="width:44px">#</th><th>Hash</th><th>Down</th><th>Dist</th>'+
-        '<th>Play</th><th>Gap / Zone</th><th>Dir</th><th>Field Dir</th><th>Result</th><th>Audio</th><th>Transcription</th><th>Call</th><th></th></tr>'+
+        '<th>Play</th><th>Dir</th><th>Field Dir</th><th>Gap / Zone</th><th>Result</th><th>Audio</th><th>Transcription</th><th></th></tr>'+
     '<tr class="fr"><td></td>'+
     '<td>'+selBox('hash',uniq(plays.map(function(p){return p.hash})).sort().map(pair))+'</td>'+
     '<td>'+selBox('down',uniq(plays.map(function(p){return p.down})).sort().map(pair))+'</td>'+
     '<td>'+selBox('dist',uniq(plays.map(function(p){return p.dist})).sort(function(a,b){return a-b}).map(function(v){return [v,v+(v>=11?'+':'')]}))+'</td>'+
     '<td>'+selBox('type',[['run','RUN'],['pass','PASS']])+'</td>'+
-    '<td>'+selBox('zone',uniq(plays.map(zoneOf)).sort(zsort).map(pair))+'</td>'+
     '<td>'+selBox('dir',[['L','Left'],['R','Right'],['none','Neutral']])+'</td>'+
     '<td>'+selBox('fdir',[['B','Boundary'],['F','Field'],['none','N/A']])+'</td>'+
+    '<td>'+selBox('zone',uniq(plays.map(zoneOf)).sort(zsort).map(pair))+'</td>'+
     '<td>'+selBox('res',[['tfl','TFL'],['pen','Penalty'],['to','Turnover'],['punt','Punt'],['big','10+'],['none','No flag']])+'</td>'+
     '<td>'+selBox('audio',[['ok','Good'],['no','Missing']])+'</td>'+
-    '<td></td><td></td><td></td></tr></thead><tbody>';
+    '<td></td><td></td></tr></thead><tbody>';
   var n=0;
   plays.forEach(function(p,i){
     if(!logMatch(p))return;
@@ -1046,13 +1045,13 @@ function renderLog(){
     h+='<tr><td>'+(i+1)+'</td><td>'+p.hash+'</td><td>'+p.down+'</td>'+
       '<td>'+p.dist+(p.dist>=11?'+':'')+'</td>'+
       '<td class="'+(p.type==='run'?'t-r':'t-p')+'">'+(p.type==='run'?'RUN':'PASS')+'</td>'+
-      '<td>'+zoneOf(p)+'</td><td>'+(dirName(p)||'<span class="dash">—</span>')+'</td>'+
+      '<td>'+(dirName(p)||'<span class="dash">—</span>')+'</td>'+
       '<td>'+(fdirName(p)||'<span class="dash">—</span>')+'</td>'+
-      '<td>'+resShort(p)+'</td>'+
+      '<td>'+zoneOf(p)+'</td><td>'+resShort(p)+'</td>'+
       '<td><span class="led '+(clipOk(p)?'ok':'no')+'"></span></td>'+
-      '<td class="callcell">'+(p.tx?esc(p.tx):'<span class="dash">—</span>')+
-        (p.txRaw&&p.txRaw!==p.tx?'<br><span class="rawtx">'+esc(p.txRaw)+'</span>':'')+'</td>'+
-      '<td class="callcell">'+(p.call?esc(p.call):'<span class="dash">—</span>')+'</td>'+
+      '<td class="callcell"><input type="text" data-tx="'+p.id+'" value="'+esc(p.tx||'')+
+        '" placeholder="—" style="width:100%;min-width:150px;padding:5px 6px;font-size:13px;font-weight:600">'+
+        (p.txRaw&&p.txRaw!==p.tx?'<br><span class="rawtx">heard: '+esc(p.txRaw)+'</span>':'')+'</td>'+
       '<td><button class="mini" data-del="'+p.id+'" style="padding:4px 8px;font-size:11px">Delete</button></td></tr>';
   });
   t.innerHTML=h+'</tbody>';
@@ -1064,6 +1063,11 @@ function renderLog(){
       allPlays=allPlays.filter(function(p){return p.id!==id});
       if(lastId===id)lastId=null;render();drawAll();renderAll();toast('Play deleted');});}});
   each('#logTable select',function(sl){sl.onchange=function(){LF[sl.dataset.lf]=sl.value;renderLog()}});
+  each('#logTable [data-tx]',function(inp){inp.onchange=function(){
+    var p=plays.filter(function(x){return x.id===+inp.dataset.tx})[0];
+    if(!p)return; p.tx=inp.value.trim();
+    dbPut('plays',p).then(function(){toast('Saved')}).catch(function(){toast('Could not save')});
+  }});
 }
 $('clrFilt').onclick=function(){
   LF={hash:'',down:'',dist:'',type:'',zone:'',dir:'',fdir:'',res:'',audio:''};renderLog();
@@ -1080,12 +1084,11 @@ function renderReview(){
       '<span class="tag '+(p.type==='run'?'r':'p')+'">'+p.type.toUpperCase()+'</span>'+
       '<span>'+situ(p)+' · '+callOf(p)+(flagsOf(p)?' · '+flagsOf(p):'')+'</span></div>'+
       '<audio controls preload="none" style="width:100%;height:36px;margin-bottom:9px"></audio>'+
-      (p.tx?'<p style="font-size:13px;margin:0 0 7px"><b>'+esc(p.tx)+'</b>'+
-        (p.txRaw&&p.txRaw!==p.tx?' <span style="color:var(--mute);font-style:italic">heard: '+esc(p.txRaw)+'</span>':'')+'</p>':'')+
-      '<input type="text" placeholder="Type the call you hear" value="'+esc(p.call||'')+'">';
+      (p.txRaw?'<p style="font-size:12px;margin:0 0 7px;color:var(--mute);font-style:italic">heard: '+esc(p.txRaw)+'</p>':'')+
+      '<input type="text" placeholder="Type or correct the call" value="'+esc(p.tx||'')+'">';
     var au=c.querySelector('audio'),inp=c.querySelector('input');
     dbGet('clips',p.id).then(function(b){if(b)au.src=URL.createObjectURL(b)});
-    inp.onchange=function(){p.call=inp.value;dbPut('plays',p).then(function(){toast('Call saved')})};
+    inp.onchange=function(){p.tx=inp.value.trim();dbPut('plays',p).then(function(){toast('Saved')})};
     o.appendChild(c);});
 }
 
@@ -1526,7 +1529,7 @@ $('expAudio').onclick=function(){
 };
 $('copyCalls').onclick=function(){
   if(!plays.length){$('tinNote').textContent='Nothing to copy.';return}
-  var col=plays.map(function(p){return p.call||p.tx||''}).join('\n');
+  var col=plays.map(function(p){return p.tx||''}).join('\n');
   var done=function(){$('tinNote').textContent='Copied '+plays.length+' rows in play order. Paste straight into a spreadsheet column.'};
   if(navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(col).then(done).catch(function(){$('tinNote').textContent='Could not copy — select the text manually.'});
@@ -1547,7 +1550,7 @@ $('tinApply').onclick=function(){
     if(!p){miss++;return}
     var text=L.slice(L.indexOf(m[1])+m[1].length).replace(/^[\s:,;\-–—.|\t"']+/,'').replace(/["']+$/,'').trim();
     if(!text){miss++;return}
-    p.call=text;hit++;jobs.push(dbPut('plays',p));
+    p.tx=text;hit++;jobs.push(dbPut('plays',p));
   });
   Promise.all(jobs).then(function(){
     renderAll();
@@ -1627,15 +1630,14 @@ $('renameGame').onclick=function(){
 /* ---------------- export ---------------- */
 $('csvBtn').onclick=function(){
   if(!plays.length){toast('Nothing to export yet');return}
-  var cols=['play','qtr','drive','down','dist','hash','type',
-    'gap_side','gap','pass_lat','pass_depth','direction','field_direction','transcription','heard_raw','tfl','penalty','turnover','punt','ten_plus','call'];
+  var cols=['play','down','dist','hash','type','direction','field_direction',
+    'gap','pass_lat','pass_depth','transcription','heard_raw'];
   var rows=[cols.join(',')];
   plays.forEach(function(p,i){
-    rows.push([i+1,p.q,p.drive,p.down,p.dist,
-      p.hash,p.type,p.side||'',p.gap||'',p.lat||'',p.dep||'',dirName(p),fdirName(p),
-      '"'+String(p.tx||'').replace(/"/g,'""')+'"','"'+String(p.txRaw||'').replace(/"/g,'""')+'"',
-      p.tfl?1:0,p.pen?1:0,p.to?1:0,p.punt?1:0,p.big?1:0,
-      '"'+String(p.call||'').replace(/"/g,'""')+'"'].join(','));});
+    rows.push([i+1,p.down,p.dist,p.hash,p.type,dirName(p),fdirName(p),
+      p.gap||'',p.lat||'',p.dep||'',
+      '"'+String(p.tx||'').replace(/"/g,'""')+'"',
+      '"'+String(p.txRaw||'').replace(/"/g,'""')+'"'].join(','));});
   var a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));
   a.download=(GAME?GAME.name.replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,''):'sideline')+'.csv';document.body.appendChild(a);a.click();a.remove();
