@@ -448,7 +448,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v27';
+var BUILD='v29';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1273,7 +1273,12 @@ function txSpawn(){
   return txw;
 }
 var txLoading=null,txLoadRes=null,txOneShot=true;
+/* Releasing the engine frees the memory, but Safari does not hand it back
+   instantly. Loading the next model straight away stacks two allocations and
+   the tab gets killed. Wait between clips. */
+var TXCOOL=4000,txCoolUntil=0,coolTimer=null;
 function txLoad(){
+  txCoolUntil=0;
   ensureEngine().then(function(ok){
     if(ok)txSet('Engine ready. Clips transcribe when the sideline goes quiet.');
   });
@@ -1293,6 +1298,7 @@ function ensureEngine(){
 function releaseEngine(){
   if(txw){try{txw.terminate()}catch(e){}txw=null}
   txReady=false;txLoading=null;txLoadRes=null;
+  txCoolUntil=Date.now()+TXCOOL;
 }
 function pcmToWav(pcm,rate){
   rate=rate||16000;
@@ -1381,6 +1387,13 @@ document.addEventListener('pointerdown',function(){
 },true);
 function pump(){
   if(txBusy||!txQueue.length)return;
+  var coolLeft=txCoolUntil-Date.now();
+  if(coolLeft>0){
+    if(!coolTimer)coolTimer=setTimeout(function(){coolTimer=null;pump()},coolLeft+50);
+    txSet('Cooling down '+Math.ceil(coolLeft/1000)+'s before the next clip ('+
+      txQueue.length+' waiting). Keeps the app from running out of memory.');
+    return;
+  }
   var quiet=Date.now()-lastTouch;
   if(quiet<IDLE){
     /* Still being used. Come back when the sideline goes quiet for a moment. */
@@ -1457,6 +1470,7 @@ function txDtypeUI(){
 }
 function txReset(msg){
   releaseEngine();
+  if(coolTimer){clearTimeout(coolTimer);coolTimer=null}
   txBusy=false;txErr='';txQueue=[];
   txSet(msg);
 }
