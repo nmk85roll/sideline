@@ -448,7 +448,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v29';
+var BUILD='v30';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -714,7 +714,7 @@ each('#flagRow .chip',function(b){b.onclick=function(){
   cur.flags[b.dataset.f]=!cur.flags[b.dataset.f];render()}});
 
 /* ---------------- audio ---------------- */
-var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true,starting=false,stopWanted=false,warmed=false;
+var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true,starting=false,stopWanted=false,warmed=false,micP=null;
 function pickMime(){var c=['audio/mp4','audio/aac','audio/webm;codecs=opus','audio/webm'];
   for(var i=0;i<c.length;i++){if(window.MediaRecorder&&MediaRecorder.isTypeSupported(c[i]))return c[i]}return''}
 function streamLive(st){
@@ -728,6 +728,28 @@ function dropStream(){
   if(stream){try{stream.getTracks().forEach(function(t){t.stop()})}catch(e){}}
   stream=null;
 }
+/* Every caller shares a single microphone request. Two concurrent getUserMedia
+   calls on iOS can leave you with a muted session — which is what made the
+   first clip of a session come back empty. */
+function getMic(){
+  if(stream&&streamLive(stream))return Promise.resolve(stream);
+  if(stream)dropStream();
+  if(micP)return micP;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)
+    return Promise.reject(new Error('no microphone API'));
+  micP=navigator.mediaDevices.getUserMedia(
+    {audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}})
+    .then(function(s){stream=s;micP=null;micReadyUI();return s})
+    .catch(function(e){micP=null;throw e});
+  return micP;
+}
+function micReadyUI(){
+  if(rec||starting)return;
+  var r=$('recBtn');
+  if(r&&!r.classList.contains('live'))
+    $('recSub').textContent=pendingClip?('Clip attached · '+pendingClip.secs+'s')
+      :(stream&&streamLive(stream)?'Mic ready':'No clip yet');
+}
 function recIdle(){
   $('recBtn').classList.remove('live');
   $('recLbl').textContent='Tap to record call';
@@ -736,12 +758,8 @@ function recIdle(){
 function startRec(){
   if(rec)return startP;
   starting=true;
-  /* iOS invalidates capture sessions behind our back — after backgrounding,
-     or when anything else opens the mic. Always check before reusing. */
-  if(stream&&!streamLive(stream))dropStream();
-  var go=stream?Promise.resolve(stream):navigator.mediaDevices.getUserMedia(
-    {audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}});
-  $('recSub').textContent='Opening mic…';
+  var go=getMic();
+  if(!(stream&&streamLive(stream)))$('recSub').textContent='Opening mic…';
   startP=go.then(function(s){
     stream=s;chunks=[];var m=pickMime();
     rec=m?new MediaRecorder(s,{mimeType:m}):new MediaRecorder(s);
@@ -763,7 +781,8 @@ function startRec(){
       if(stopRes){var r=stopRes;stopRes=null;r()}
     };
     starting=false;
-    if(stopWanted){stopWanted=false;starting=false;rec=null;recIdle();return}
+    if(stopWanted){stopWanted=false;starting=false;rec=null;recIdle();
+      toast('Mic was not ready — nothing recorded, tap record again');return}
     rec.start();recStart=Date.now();
     $('recBtn').classList.add('live');
     $('recSub').textContent='Tap to stop';
@@ -783,8 +802,10 @@ function stopRec(){
 }
 $('recBtn').onclick=function(){
   if(rec){stopRec();return}
-  if(starting){ /* the mic is still opening — do not silently swallow the tap */
-    $('recSub').textContent='Still opening the mic — tap again in a moment';
+  if(starting){
+    /* Stopping now would save a clip with nothing in it. Cancel instead and say so. */
+    stopWanted=true;
+    $('recSub').textContent='Mic was not ready — tap record again';
     return;
   }
   startRec();
@@ -794,14 +815,12 @@ $('recBtn').onclick=function(){
    night does not have to wait for it. Without this the opening tap races the
    mic and the clip comes back empty. */
 function warmMic(){
-  if(warmed||stream||rec||NOSTORE===undefined)return;
-  warmed=true;
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)return;
-  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}})
-    .then(function(st){ if(!stream)stream=st; else {try{st.getTracks().forEach(function(t){t.stop()})}catch(e){}} })
-    .catch(function(){ warmed=false; /* not granted yet — the mic test will handle it */ });
+  if(rec||starting)return;
+  if(stream&&streamLive(stream))return;
+  getMic().catch(function(){ /* not granted yet — the mic test handles that */ });
 }
-document.addEventListener('pointerdown',warmMic,{once:false,capture:true});
+document.addEventListener('pointerdown',warmMic,true);
+setTimeout(warmMic,300);   /* try immediately too, in case permission is already granted */
 
 /* ---------------- save / advance ---------------- */
 function savePlay(){
@@ -1495,10 +1514,7 @@ $('micTest').onclick=function(){
   note.textContent='Requesting the microphone…';
   /* Reuse the app's own microphone session so this both grants permission and
      leaves the mic open — the first play of the night then records instantly. */
-  var get=(stream&&streamLive(stream))?Promise.resolve(stream)
-    :navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}});
-  get.then(function(st){
-    stream=st;
+  getMic().then(function(st){
     var mime=pickMime(),chunks=[],r;
     try{ r=mime?new MediaRecorder(st,{mimeType:mime}):new MediaRecorder(st); }
     catch(e){ note.textContent='MediaRecorder refused to start: '+(e&&e.name||e); return; }
