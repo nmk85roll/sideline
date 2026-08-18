@@ -384,7 +384,12 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
     Records three seconds and reports exactly what was captured. Use this first if a play comes back silent.</p>
   <div class="row" style="padding:0 0 8px">
     <button class="mini solid" id="micTest">Record 3-second test</button>
+    <button class="mini solid" id="micHoldBtn">Keep mic open: on</button>
   </div>
+  <p style="font-size:12.5px;color:var(--mute);margin:0 0 8px;line-height:1.5">
+    On (default) starts recording instantly, but the iPad's orange microphone indicator stays lit
+    for the whole game even between plays. Off makes the indicator honest — lit only while a clip
+    is recording — at the cost of about a quarter second to open the mic on each tap.</p>
   <p id="micNote" style="font-size:12.5px;color:var(--mute);margin:0 0 8px;line-height:1.5">Not run yet.</p>
   <p id="micLbl1" style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--mute);
     font-weight:700;margin:6px 0 3px;display:none">What the microphone recorded</p>
@@ -452,7 +457,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v17';
+var BUILD='v19';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -483,10 +488,12 @@ function dbPut(n,v,k){if(NOSTORE||!db)return noStore(undefined);return new Promi
 function dbGet(n,k){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readonly').get(k);r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)}})}
 function dbAll(n){if(NOSTORE||!db)return noStore([]);return new Promise(function(res,rej){var r=st(n,'readonly').getAll();r.onsuccess=function(){res(r.result||[])};r.onerror=function(){rej(r.error)}})}
 function dbDel(n,k){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').delete(k);r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
+function dbKeys(n){return new Promise(function(res,rej){if(NOSTORE||!db)return res([]);
+  var r=st(n,'readonly').getAllKeys();r.onsuccess=function(){res(r.result||[])};r.onerror=function(){rej(r.error)}})}
 function dbClear(n){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').clear();r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
 
 /* ---------------- state ---------------- */
-var S={q:1,drive:1,down:1,dist:10,hash:'M',txAuto:false,txModel:''};
+var S={q:1,drive:1,down:1,dist:10,hash:'M',txAuto:false,txModel:'',micRelease:false};
 var cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
 var plays=[],allPlays=[],pendingClip=null,lastId=null;
 var GAME={id:Date.now(),name:'Game 1',created:Date.now()},games=[GAME],provisional=true;
@@ -702,7 +709,7 @@ each('#flagRow .chip',function(b){b.onclick=function(){
   cur.flags[b.dataset.f]=!cur.flags[b.dataset.f];render()}});
 
 /* ---------------- audio ---------------- */
-var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null;
+var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true;
 function pickMime(){var c=['audio/mp4','audio/aac','audio/webm;codecs=opus','audio/webm'];
   for(var i=0;i<c.length;i++){if(window.MediaRecorder&&MediaRecorder.isTypeSupported(c[i]))return c[i]}return''}
 function streamLive(st){
@@ -728,6 +735,7 @@ function startRec(){
   if(stream&&!streamLive(stream))dropStream();
   var go=stream?Promise.resolve(stream):navigator.mediaDevices.getUserMedia(
     {audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}});
+  $('recSub').textContent='Opening mic…';
   startP=go.then(function(s){
     stream=s;chunks=[];var m=pickMime();
     rec=m?new MediaRecorder(s,{mimeType:m}):new MediaRecorder(s);
@@ -742,6 +750,9 @@ function startRec(){
         dropStream();
         toast('Recording was empty — mic reset, tap record again');
       }
+      /* Let the microphone go, so the iPad's indicator means what it says:
+         lit = recording, dark = not. Reopening costs a fraction of a second. */
+      if(!micHold)dropStream();
       recIdle();
       if(stopRes){var r=stopRes;stopRes=null;r()}
     };
@@ -1359,6 +1370,14 @@ $('txModelBtn').onclick=function(){
   txReady=false;txBusy=false;txErr='';txQueue=[];
   txSet('Switched. Tap Download speech model to fetch it (once, on WiFi).');
 };
+function micHoldUI(){
+  $('micHoldBtn').textContent='Keep mic open: '+(micHold?'on':'off');
+  $('micHoldBtn').classList.toggle('solid',micHold);
+}
+$('micHoldBtn').onclick=function(){
+  micHold=!micHold;S.micRelease=!micHold;saveState();micHoldUI();
+  if(!micHold&&!rec)dropStream();
+};
 $('micTest').onclick=function(){
   var note=$('micNote');
   note.textContent='Requesting the microphone…';
@@ -1527,7 +1546,7 @@ function dropGame(id){
     .concat([dbDel('games',id)])).then(function(){
       allPlays=allPlays.filter(function(p){return p.game!==id});
       games=games.filter(function(x){return x.id!==id});
-      renderGames();toast('Deleted '+g.name);
+      sweepClips();renderGames();toast('Deleted '+g.name);
   });
 }
 $('newGame').onclick=newGame;
@@ -1555,15 +1574,30 @@ $('csvBtn').onclick=function(){
   a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));
   a.download=(GAME?GAME.name.replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,''):'sideline')+'.csv';document.body.appendChild(a);a.click();a.remove();
 };
+/* Delete every clip that no longer belongs to a surviving play. Without this,
+   audio accumulates invisibly and eats the iPad's storage. */
+function sweepClips(){
+  return dbKeys('clips').then(function(keys){
+    var live={};
+    allPlays.forEach(function(p){live[p.id]=1});
+    var junk=keys.filter(function(k){return !live[k]});
+    if(!junk.length)return 0;
+    return Promise.all(junk.map(function(k){return dbDel('clips',k)})).then(function(){return junk.length});
+  }).catch(function(){return 0});
+}
 $('wipeBtn').onclick=function(){
   if(!plays.length){toast('Nothing to clear');return}
-  if(!confirm('Clear all '+plays.length+' plays and clips from "'+GAME.name+'"? This cannot be undone.'))return;
+  if(!confirm('Clear all '+plays.length+' plays and their audio from "'+GAME.name+'"? This cannot be undone.'))return;
   var doomed=plays.slice();
   Promise.all(doomed.map(function(p){return dbDel('plays',p.id)})
     .concat(doomed.map(function(p){return dbDel('clips',p.id)}))).then(function(){
       allPlays=allPlays.filter(function(p){return p.game!==GAME.id});
       plays=[];lastId=null;S.drive=1;S.down=1;S.dist=10;S.q=1;
-      saveState();render();drawAll();renderAll();toast('Cleared');
+      pendingClip=null;txQueue=[];
+      return sweepClips();
+  }).then(function(n){
+      saveState();render();drawAll();renderAll();
+      toast('Cleared'+(n?' ('+n+' stray clip'+(n===1?'':'s')+' removed)':''));
   });
 };
 
@@ -1606,8 +1640,10 @@ openDB().then(function(){
 }).then(function(){
   provisional=false;
   render();drawAll();renderAll();
+  micHold=!S.micRelease;micHoldUI();
   if(S.txModel)TXMODEL=S.txModel;
   txModelUI();buildMsg();
+  sweepClips();
   if(S.txAuto){ txAuto=true; txAutoUI(); txLoad(); }
   else txAutoUI();
 });
