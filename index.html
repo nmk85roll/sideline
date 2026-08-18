@@ -408,6 +408,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
     <button class="mini" id="txAutoBtn">Auto: off</button>
     <button class="mini" id="txAllBtn">Transcribe pending</button>
     <button class="mini" id="txModelBtn">Model: tiny (40MB)</button>
+    <button class="mini" id="txDtypeBtn">Precision: fp32</button>
   </div>
   <p id="txStatus" style="font-size:12.5px;color:var(--mute);margin:0 0 4px;line-height:1.45">Not started.</p>
 
@@ -457,7 +458,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v19';
+var BUILD='v20';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -493,7 +494,7 @@ function dbKeys(n){return new Promise(function(res,rej){if(NOSTORE||!db)return r
 function dbClear(n){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').clear();r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
 
 /* ---------------- state ---------------- */
-var S={q:1,drive:1,down:1,dist:10,hash:'M',txAuto:false,txModel:'',micRelease:false};
+var S={q:1,drive:1,down:1,dist:10,hash:'M',txAuto:false,txModel:'',txDtype:'',micRelease:false};
 var cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
 var plays=[],allPlays=[],pendingClip=null,lastId=null;
 var GAME={id:Date.now(),name:'Game 1',created:Date.now()},games=[GAME],provisional=true;
@@ -1184,7 +1185,9 @@ function matchCall(raw){
 
 /* ---------------- transcription queue ---------------- */
 var TXMODELS=[['onnx-community/whisper-tiny.en','tiny (40MB)'],['onnx-community/whisper-base.en','base (75MB)'],['onnx-community/whisper-small.en','small (250MB)']];
-var TXMODEL=TXMODELS[0][0];
+var TXMODEL=TXMODELS[1][0];
+var TXDTYPES=[['q8','q8 — smallest'],['fp32','fp32 — most accurate'],['q4f16','q4f16 — GPU balance']];
+var TXDTYPE='fp32';
 var txw=null,txReady=false,txBusy=false,txQueue=[],txAuto=false,txErr='',txLast=null;
 function txSet(t){var e=$('txStatus');if(e)e.textContent=t}
 function txSpawn(){
@@ -1225,7 +1228,7 @@ function txSpawn(){
 }
 function txLoad(){
   var w=txSpawn(); if(!w)return;
-  txSet('Starting…'); w.postMessage({type:'load',model:TXMODEL});
+  txSet('Starting…'); w.postMessage({type:'load',model:TXMODEL,dtype:TXDTYPE});
 }
 /* Wrap the exact samples handed to the model as a playable 16k WAV.
    If this sounds wrong, the problem is upstream of the model. */
@@ -1303,6 +1306,7 @@ function pcmFrom(blob){
       var trimmed=(en>st)?pcm.subarray(st,en+1):pcm;
       /* Trimming is an optimisation, never a gatekeeper. If it ate the clip, keep the original. */
       if(trimmed.length<16000*0.4)trimmed=pcm;
+      trimmed=new Float32Array(trimmed);  /* own buffer, offset 0 */
       return {pcm:trimmed,peak:peak,secs:trimmed.length/16000,rawSecs:pcm.length/16000,how:how};
     });
   });
@@ -1358,17 +1362,30 @@ function txModelUI(){
   var m=TXMODELS.filter(function(x){return x[0]===TXMODEL})[0];
   $('txModelBtn').textContent='Model: '+(m?m[1]:'?');
 }
+function txDtypeUI(){
+  var d=TXDTYPES.filter(function(x){return x[0]===TXDTYPE})[0];
+  $('txDtypeBtn').textContent='Precision: '+(d?d[1]:TXDTYPE);
+}
+function txReset(msg){
+  if(txw){try{txw.terminate()}catch(e){}txw=null}
+  txReady=false;txBusy=false;txErr='';txQueue=[];
+  txSet(msg);
+}
+$('txDtypeBtn').onclick=function(){
+  var i=0,k;
+  for(k=0;k<TXDTYPES.length;k++)if(TXDTYPES[k][0]===TXDTYPE)i=k;
+  TXDTYPE=TXDTYPES[(i+1)%TXDTYPES.length][0];
+  S.txDtype=TXDTYPE;saveState();txDtypeUI();buildMsg();
+  txReset('Precision changed. Tap Download speech model to fetch it.');
+};
 $('txModelBtn').onclick=function(){
   var i=0,k;
   for(k=0;k<TXMODELS.length;k++)if(TXMODELS[k][0]===TXMODEL)i=k;
   TXMODEL=TXMODELS[(i+1)%TXMODELS.length][0];
   S.txModel=TXMODEL;saveState();txModelUI();buildMsg();
-  /* A different model means a fresh worker. The microphone is unrelated and
-     must be left alone — but drop any stale session just in case. */
-  if(txw){try{txw.terminate()}catch(e){}txw=null}
+  /* A different model means a fresh worker. The microphone is unrelated. */
   if(stream&&!streamLive(stream))dropStream();
-  txReady=false;txBusy=false;txErr='';txQueue=[];
-  txSet('Switched. Tap Download speech model to fetch it (once, on WiFi).');
+  txReset('Switched. Tap Download speech model to fetch it (once, on WiFi).');
 };
 function micHoldUI(){
   $('micHoldBtn').textContent='Keep mic open: '+(micHold?'on':'off');
@@ -1642,7 +1659,8 @@ openDB().then(function(){
   render();drawAll();renderAll();
   micHold=!S.micRelease;micHoldUI();
   if(S.txModel)TXMODEL=S.txModel;
-  txModelUI();buildMsg();
+  if(S.txDtype)TXDTYPE=S.txDtype;
+  txModelUI();txDtypeUI();buildMsg();
   sweepClips();
   if(S.txAuto){ txAuto=true; txAutoUI(); txLoad(); }
   else txAutoUI();
@@ -1668,7 +1686,7 @@ function swMsg(t){var e=$('swStatus');if(e)e.textContent=t}
 function buildMsg(){
   var e=$('buildLine');if(!e)return;
   e.textContent='App build '+BUILD+'. Speech model: '+
-    (TXMODEL.split('/').pop())+'. If this is not the build you just uploaded, '+
+    (TXMODEL.split('/').pop())+' at '+TXDTYPE+'. If this is not the build you just uploaded, '+
     'close the app fully and reopen it while on WiFi.';
 }
 var SW_READY='Ready. This app opens and runs with no signal — everything is stored on this iPad.';

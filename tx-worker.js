@@ -5,13 +5,13 @@
 let asr = null;
 let loading = null;
 
-async function load(model, device) {
+async function load(model, device, dtype) {
   const { pipeline, env } = await import(
     'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js'
   );
   env.allowLocalModels = false;
   return pipeline('automatic-speech-recognition', model, {
-    dtype: 'q8',
+    dtype: dtype || 'q8',
     device: device,
     progress_callback: (p) => {
       if (p && p.status === 'progress' && p.total) {
@@ -35,7 +35,7 @@ self.onmessage = async (e) => {
       let lastErr = null;
       for (const dev of order) {
         try {
-          asr = await load(m.model, dev);
+          asr = await load(m.model, dev, m.dtype);
           self.postMessage({ type: 'ready', device: dev });
           return;
         } catch (err) {
