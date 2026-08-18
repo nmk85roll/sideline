@@ -448,7 +448,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v26';
+var BUILD='v27';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -714,7 +714,7 @@ each('#flagRow .chip',function(b){b.onclick=function(){
   cur.flags[b.dataset.f]=!cur.flags[b.dataset.f];render()}});
 
 /* ---------------- audio ---------------- */
-var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true;  /* mic stays open: instant start */
+var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true,starting=false,stopWanted=false,warmed=false;
 function pickMime(){var c=['audio/mp4','audio/aac','audio/webm;codecs=opus','audio/webm'];
   for(var i=0;i<c.length;i++){if(window.MediaRecorder&&MediaRecorder.isTypeSupported(c[i]))return c[i]}return''}
 function streamLive(st){
@@ -735,6 +735,7 @@ function recIdle(){
 }
 function startRec(){
   if(rec)return startP;
+  starting=true;
   /* iOS invalidates capture sessions behind our back — after backgrounding,
      or when anything else opens the mic. Always check before reusing. */
   if(stream&&!streamLive(stream))dropStream();
@@ -761,12 +762,14 @@ function startRec(){
       recIdle();
       if(stopRes){var r=stopRes;stopRes=null;r()}
     };
+    starting=false;
+    if(stopWanted){stopWanted=false;starting=false;rec=null;recIdle();return}
     rec.start();recStart=Date.now();
     $('recBtn').classList.add('live');
     $('recSub').textContent='Tap to stop';
     clearInterval(tick);
     tick=setInterval(function(){$('recLbl').textContent=((Date.now()-recStart)/1000).toFixed(1)+'s'},100);
-  }).catch(function(){toast('Microphone blocked — check Settings › Safari');recIdle()});
+  }).catch(function(){starting=false;toast('Microphone blocked — check Settings › Safari');recIdle()});
   return startP;
 }
 function stopRec(){
@@ -778,7 +781,27 @@ function stopRec(){
     } else {rec=null;recIdle();res()}
   });
 }
-$('recBtn').onclick=function(){ if(rec)stopRec(); else startRec() };
+$('recBtn').onclick=function(){
+  if(rec){stopRec();return}
+  if(starting){ /* the mic is still opening — do not silently swallow the tap */
+    $('recSub').textContent='Still opening the mic — tap again in a moment';
+    return;
+  }
+  startRec();
+};
+
+/* Open the microphone on the very first touch anywhere, so the first play of the
+   night does not have to wait for it. Without this the opening tap races the
+   mic and the clip comes back empty. */
+function warmMic(){
+  if(warmed||stream||rec||NOSTORE===undefined)return;
+  warmed=true;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)return;
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}})
+    .then(function(st){ if(!stream)stream=st; else {try{st.getTracks().forEach(function(t){t.stop()})}catch(e){}} })
+    .catch(function(){ warmed=false; /* not granted yet — the mic test will handle it */ });
+}
+document.addEventListener('pointerdown',warmMic,{once:false,capture:true});
 
 /* ---------------- save / advance ---------------- */
 function savePlay(){
