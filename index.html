@@ -448,7 +448,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v31';
+var BUILD='v33';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -714,7 +714,7 @@ each('#flagRow .chip',function(b){b.onclick=function(){
   cur.flags[b.dataset.f]=!cur.flags[b.dataset.f];render()}});
 
 /* ---------------- audio ---------------- */
-var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true,starting=false,stopWanted=false,warmed=false,micP=null;
+var stream=null,rec=null,chunks=[],recStart=0,tick=null,startP=null,stopRes=null,micHold=true,starting=false,stopWanted=false,warmed=false,micP=null,stopping=false,recMime='';
 function pickMime(){var c=['audio/mp4','audio/aac','audio/webm;codecs=opus','audio/webm'];
   for(var i=0;i<c.length;i++){if(window.MediaRecorder&&MediaRecorder.isTypeSupported(c[i]))return c[i]}return''}
 function streamLive(st){
@@ -738,13 +738,17 @@ function getMic(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)
     return Promise.reject(new Error('no microphone API'));
   micP=navigator.mediaDevices.getUserMedia(
-    {audio:{echoCancellation:false,noiseSuppression:true,autoGainControl:true}})
+    /* Noise suppression is tuned for phone calls: it gates and band-limits speech,
+       which speech models transcribe worse than raw audio. Gain control stays on
+       so a coach a few feet away still registers. Since v30 the session is opened
+       at launch and held, so suppression had far longer to adapt to crowd noise. */
+    {audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:true}})
     .then(function(s){stream=s;micP=null;micReadyUI();return s})
     .catch(function(e){micP=null;throw e});
   return micP;
 }
 function micReadyUI(){
-  if(rec||starting)return;
+  if(rec||starting||stopping)return;
   var r=$('recBtn');
   if(r&&!r.classList.contains('live'))
     $('recSub').textContent=pendingClip?('Clip attached · '+pendingClip.secs+'s')
@@ -763,11 +767,17 @@ function startRec(){
   startP=go.then(function(s){
     stream=s;chunks=[];var m=pickMime();
     rec=m?new MediaRecorder(s,{mimeType:m}):new MediaRecorder(s);
+    recMime=rec.mimeType||m||'audio/mp4';
     rec.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data)};
     rec.onstop=function(){
       var secs=Math.max(1,Math.round((Date.now()-recStart)/1000));
-      var blob=new Blob(chunks,{type:rec.mimeType||'audio/mp4'});rec=null;
-      if(blob.size>800){pendingClip={blob:blob,secs:secs}}
+      var blob=new Blob(chunks,{type:recMime||'audio/mp4'});
+      rec=null;stopping=false;
+      var had=!!pendingClip;
+      if(blob.size>800){
+        pendingClip={blob:blob,secs:secs};
+        if(had)toast('Replaced the previous clip for this play');
+      }
       else{
         /* Nothing came through. The capture session is dead — bin it so the
            next tap gets a fresh one, and say so rather than showing a red dot. */
@@ -795,13 +805,20 @@ function stopRec(){
   return new Promise(function(res){
     clearInterval(tick);
     if(rec&&rec.state!=='inactive'){
-      stopRes=res;
-      try{rec.stop()}catch(e){stopRes=null;rec=null;recIdle();res()}
-    } else {rec=null;recIdle();res()}
+      stopping=true;stopRes=res;
+      try{rec.stop()}catch(e){stopping=false;stopRes=null;rec=null;recIdle();res()}
+    } else if(stopping){
+      /* Already stopping — the recorder's own callback is still coming.
+         Wait for it instead of clearing the reference out from under it. */
+      var prev=stopRes;
+      stopRes=function(){ if(prev)prev(); res() };
+    } else {
+      rec=null;recIdle();res();
+    }
   });
 }
 $('recBtn').onclick=function(){
-  if(rec){stopRec();return}
+  if(rec||stopping){stopRec();return}
   if(starting){
     /* Stopping now would save a clip with nothing in it. Cancel instead and say so. */
     stopWanted=true;
@@ -815,7 +832,7 @@ $('recBtn').onclick=function(){
    night does not have to wait for it. Without this the opening tap races the
    mic and the clip comes back empty. */
 function warmMic(){
-  if(rec||starting)return;
+  if(rec||starting||stopping)return;
   if(stream&&streamLive(stream))return;
   getMic().catch(function(){ /* not granted yet — the mic test handles that */ });
 }
@@ -1523,7 +1540,14 @@ $('micTest').onclick=function(){
     r.onstop=function(){
       var blob=new Blob(chunks,{type:r.mimeType||'audio/mp4'});
       var el=$('micPlay');el.src=URL.createObjectURL(blob);el.style.display='block';
-      var head='Format '+(r.mimeType||'unknown')+' · file '+Math.round(blob.size/1024)+' KB. ';
+      var st2='';
+      try{
+        var tr=st.getAudioTracks()[0], sset=tr.getSettings?tr.getSettings():{};
+        st2=' [mic: '+(sset.sampleRate||'?')+'Hz, noiseSuppression='+
+          (sset.noiseSuppression===undefined?'n/a':sset.noiseSuppression)+
+          ', autoGain='+(sset.autoGainControl===undefined?'n/a':sset.autoGainControl)+']';
+      }catch(e){}
+      var head='Format '+(r.mimeType||'unknown')+' · file '+Math.round(blob.size/1024)+' KB.'+st2+' ';
       if(blob.size<800){note.textContent=head+'The recorder produced no data at all — the microphone is not reaching the app.';return}
       head='Microphone permission granted and mic left open, so the first play records instantly. '+head;
       pcmFrom(blob).then(function(a){
