@@ -453,7 +453,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v39';
+var BUILD='v41';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1326,6 +1326,7 @@ function txSpawn(){
         (ms>12000?' That is too slow for live use — drop to a smaller model or q8.':''));
       if(txOneShot)releaseEngine();
       txFaster();markRunning(false);
+      txDone++;lastRunAt=Date.now();needFreshIdle=true;
       txBusy=false;txBusyOn=0;pump();txRelock();
     }
     else if(m.type==='error'){
@@ -1352,6 +1353,13 @@ var txLoading=null,txLoadRes=null,txOneShot=true;
 var TXCOOL=6000,TXCOOL_MIN=5000,TXCOOL_MAX=120000;
 var txCoolUntil=0,coolTimer=null,lockTimer=null,txBusyOn=0;
 var txAuto=true,txWins=0,crashedLast=false;
+var txDone=0,RELOAD_AFTER=25;
+/* Entering plays slowly never causes trouble, because each clip is transcribed
+   alone in the gap before the next play. Entering fast builds a backlog that then
+   drains back to back, and consecutive model loads are what kill the app. So a
+   backlog is made to drain at the same rhythm: one clip per quiet period, never
+   two in a row. Walk away and it still finishes, just on a slower clock. */
+var lastRunAt=0,needFreshIdle=false,BACKLOG_GAP_MULT=4;
 /* The iPad's real limit is unknown and varies with what else it is doing, so the
    app finds it by experiment: slow down after any failure, and after a crash
    mid-run, then creep back up once clips are landing cleanly. The learned pace
@@ -1493,8 +1501,20 @@ document.addEventListener('pointerdown',function(){
   lastTouch=Date.now();
   if(idleTimer){clearTimeout(idleTimer);idleTimer=null}
 },true);
+function safeToReload(){
+  return txAuto && txDone>=RELOAD_AFTER && txQueue.length && !txBusy
+    && !rec && !starting && !stopping && !pendingClip
+    && (Date.now()-lastTouch)>8000;
+}
 function pump(){
   if(txBusy||!txQueue.length)return;
+  if(safeToReload()){
+    markRunning(false);
+    txSet('Restarting the app to clear memory — transcription resumes on its own.');
+    toast('Clearing memory, back in a second');
+    setTimeout(function(){location.reload()},1200);
+    return;
+  }
   var coolLeft=txCoolUntil-Date.now();
   if(coolLeft>0){
     if(!coolTimer)coolTimer=setTimeout(function(){coolTimer=null;pump()},coolLeft+50);
@@ -1505,6 +1525,19 @@ function pump(){
   if(rec||starting||stopping){
     if(!idleTimer)idleTimer=setTimeout(function(){idleTimer=null;pump()},1200);
     return;
+  }
+  if(needFreshIdle){
+    var touchedSince=lastTouch>lastRunAt;
+    var waited=Date.now()-lastRunAt;
+    if(touchedSince){
+      needFreshIdle=false;                       /* a new play went in: next gap is fair game */
+    }else if(waited>=TXCOOL*BACKLOG_GAP_MULT){
+      needFreshIdle=false;                       /* nobody is charting: drain slowly anyway */
+    }else{
+      if(!idleTimer)idleTimer=setTimeout(function(){idleTimer=null;pump()},1000);
+      txSet('Waiting before the next clip · '+txQueue.length+' left · one at a time keeps this stable.');
+      return;
+    }
   }
   var quiet=Date.now()-lastTouch;
   if(quiet<IDLE){
