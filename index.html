@@ -452,7 +452,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v36';
+var BUILD='v37';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -889,7 +889,9 @@ each('.tabs button',function(b){b.onclick=function(){
   each('.tabs button',function(x){x.classList.remove('on')});
   each('.pane',function(x){x.classList.remove('on')});
   b.classList.add('on');$(b.dataset.tab).classList.add('on');
-  if(b.dataset.tab==='chart')drawAll(); else renderAll();}});
+  if(activeTab==='review'&&b.dataset.tab!=='review')freeURLs();
+  activeTab=b.dataset.tab;
+  if(activeTab==='chart')drawAll(); else renderAll();}});
 
 /* ---------------- tendencies ---------------- */
 var F={down:'',dist:'',hash:'',dir:'',fdir:'',type:''};
@@ -1149,20 +1151,38 @@ $('clrFilt').onclick=function(){
 /* ---------------- review ---------------- */
 function renderReview(){
   var o=$('revOut'),wc=plays.filter(function(p){return p.clip});
+  freeURLs();
   if(!wc.length){o.innerHTML='<p class="empty">No clips yet. Hold the record button while the call goes out and it shows up here.</p>';return}
-  o.innerHTML='';
+  var h='';
   wc.forEach(function(p){
-    var c=document.createElement('div');c.className='card';
-    c.innerHTML='<div class="hdr"><b>#'+(plays.indexOf(p)+1)+'</b>'+
+    h+='<div class="card"><div class="hdr"><b>#'+(plays.indexOf(p)+1)+'</b>'+
       '<span class="tag '+(p.type==='run'?'r':'p')+'">'+p.type.toUpperCase()+'</span>'+
       '<span>'+situ(p)+' · '+callOf(p)+(flagsOf(p)?' · '+flagsOf(p):'')+'</span></div>'+
-      '<audio controls preload="none" style="width:100%;height:36px;margin-bottom:9px"></audio>'+
       (p.txRaw?'<p style="font-size:12px;margin:0 0 7px;color:var(--mute);font-style:italic">heard: '+esc(p.txRaw)+'</p>':'')+
-      '<input type="text" placeholder="Type or correct the call" value="'+esc(p.tx||'')+'">';
-    var au=c.querySelector('audio'),inp=c.querySelector('input');
-    dbGet('clips',p.id).then(function(b){if(b)au.src=URL.createObjectURL(b)});
-    inp.onchange=function(){p.tx=inp.value.trim();dbPut('plays',p).then(function(){toast('Saved')})};
-    o.appendChild(c);});
+      '<button class="mini" data-hear="'+p.id+'" style="margin-bottom:8px">Play clip</button>'+
+      '<span data-slot="'+p.id+'"></span>'+
+      '<input type="text" data-rev="'+p.id+'" placeholder="Type or correct the call" value="'+esc(p.tx||'')+'">'+
+      '</div>';
+  });
+  o.innerHTML=h;
+  /* Audio loads only when asked. Building a player for every clip on every
+     render is what quietly filled the iPad's memory. */
+  each('#revOut [data-hear]',function(b){b.onclick=function(){
+    var id=+b.dataset.hear;
+    dbGet('clips',id).then(function(blob){
+      if(!blob){b.textContent='No clip';return}
+      var slot=document.querySelector('#revOut [data-slot="'+id+'"]');
+      if(!slot)return;
+      slot.innerHTML='<audio controls autoplay style="width:100%;height:36px;margin:6px 0"></audio>';
+      slot.querySelector('audio').src=newURL(blob);
+      b.style.display='none';
+    }).catch(function(){b.textContent='Could not load'});
+  }});
+  each('#revOut [data-rev]',function(inp){inp.onchange=function(){
+    var p=plays.filter(function(x){return x.id===+inp.dataset.rev})[0];
+    if(!p)return; p.tx=inp.value.trim();
+    dbPut('plays',p).then(function(){toast('Saved')}).catch(function(){toast('Could not save')});
+  }});
 }
 
 var VOCAB=["abby", "alert", "apache", "ax", "badger", "ball", "balls", "bam", "base", "bat", "bear", "bench", "bic", "birds", "black", "blitz", "blood", "blue", "bob", "boom", "boot", "boss", "bravo", "brown", "buc", "bullets", "cab", "cats", "charlie", "check", "cherokee", "chicago", "choke", "chuckie", "cinco", "cities", "corner", "corral", "crash", "cross", "delta", "detroit", "dime", "dogs", "dolphin", "double", "drop", "eagle", "edge", "emmitt", "eskimo", "falcon", "field", "fire", "flat", "flip", "fox", "fun", "funnel", "goal", "gold", "green", "gut", "hammer", "head", "hole", "horse", "hot", "husky", "illini", "indian", "indy", "inn", "jugs", "jump", "kick", "knife", "kong", "lap", "lax", "light", "lightning", "line", "lion", "loop", "mac", "man", "match", "miami", "micky", "mini", "mix", "mof", "nap", "navaho", "new", "nickel", "noah", "nose", "nut", "odd", "okie", "omaha", "orange", "orca", "orlando", "over", "owl", "packer", "pat", "peel", "pic", "pick", "pinch", "pizza", "plasma", "plus", "press", "pub", "pull", "quarters", "rat", "rhino", "roc", "roll", "run", "safe", "sax", "screw", "scroll", "seal", "seminole", "shark", "sift", "sioux", "skuzz", "slide", "smoke", "sneak", "sparrow", "spider", "spin", "sprint", "strong", "tab", "tampa", "tango", "tebow", "thunder", "tite", "tits", "toby", "tonto", "trey", "tri", "trick", "trim", "truck", "tuff", "turbo", "twist", "uno", "warren", "wax", "weak", "whale", "wham", "whip", "wide", "wizard", "wolf", "yellow", "york"];
@@ -1695,6 +1715,12 @@ $('tinApply').onclick=function(){
 function gLabel(g){var d=new Date(g.created);
   return d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}
 function countFor(id){return allPlays.filter(function(p){return p.game===id}).length}
+var liveURLs=[];
+function newURL(b){var u=URL.createObjectURL(b);liveURLs.push(u);return u}
+function freeURLs(){
+  liveURLs.forEach(function(u){try{URL.revokeObjectURL(u)}catch(e){}});
+  liveURLs=[];
+}
 function renderGames(){
   showWarn();
   if(!GAME){$('curGame').textContent='No game loaded';
@@ -1803,7 +1829,13 @@ $('wipeBtn').onclick=function(){
 
 /* ---------------- boot ---------------- */
 function safe(fn,label){try{fn()}catch(e){console.error(label,e);toast(label+' failed: '+(e&&e.name||'error'))}}
-function renderAll(){safe(renderTend,'Tendencies');safe(renderLog,'Log');safe(renderReview,'Review');safe(renderGames,'Games')}
+var activeTab='chart';
+/* Rendering panes nobody is looking at costs memory and time for nothing. */
+function renderAll(){
+  if(activeTab==='tend')safe(renderTend,'Tendencies');
+  else if(activeTab==='log')safe(renderLog,'Log');
+  else if(activeTab==='review'){safe(renderReview,'Review');safe(renderGames,'Games')}
+}
 openDB().then(function(){
   return Promise.all([dbAll('plays'),dbAll('games'),dbGet('meta','state'),dbGet('meta','current')]);
 }).then(function(r){
