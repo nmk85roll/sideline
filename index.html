@@ -452,7 +452,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v35';
+var BUILD='v36';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1326,7 +1326,7 @@ var txLoading=null,txLoadRes=null,txOneShot=true;
 /* Releasing the engine frees the memory, but Safari does not hand it back
    instantly. Loading the next model straight away stacks two allocations and
    the tab gets killed. Wait between clips. */
-var TXCOOL=4000,txCoolUntil=0,coolTimer=null,txBusyOn=0;
+var TXCOOL=4000,txCoolUntil=0,coolTimer=null,lockTimer=null,txBusyOn=0;
 /* One clip at a time, always. While one is running — or while the iPad is being
    given a moment to reclaim its memory — every Transcribe button is locked. */
 function txLock(){ return txBusy || Date.now()<txCoolUntil }
@@ -1338,8 +1338,9 @@ function txLockLabel(){
 function txRelock(){
   if(typeof renderLog!=='function')return;
   if($('logTable'))renderLog();
-  if(txLock()&&!coolTimer){
-    coolTimer=setTimeout(function(){coolTimer=null;txRelock()},600);
+  if(lockTimer){clearTimeout(lockTimer);lockTimer=null}
+  if(txLock()){
+    lockTimer=setTimeout(function(){lockTimer=null;txRelock()},500);
   }
 }
 function txLoad(){
@@ -1468,10 +1469,28 @@ function pump(){
   var id=txQueue[0],p=plays.filter(function(x){return x.id===id})[0];
   if(!p||!p.clip){txQueue.shift();pump();return}
   txBusy=true;txBusyOn=id;txRelock();
+  txErr='';
   ensureEngine().then(function(ok){
-    if(!ok){txBusy=false;return}
+    if(!ok){
+      /* The model would not load — almost always the iPad not having handed the
+         memory back yet. Say so where the coach is actually looking, throw the
+         engine away, and wait longer before the next attempt. */
+      txQueue.shift();txBusy=false;txBusyOn=0;
+      releaseEngine();
+      txCoolUntil=Date.now()+Math.max(TXCOOL*2,8000);
+      var pf=plays.filter(function(x){return x.id===id})[0];
+      if(pf){pf.txRaw='[engine would not load — tap Transcribe now again]';
+        dbPut('plays',pf).catch(function(){});}
+      toast('Speech engine could not load — try that play again in a few seconds');
+      txRelock();
+      return;
+    }
     txQueue.shift();
     runClip(id,p);
+  }).catch(function(e){
+    txQueue.shift();txBusy=false;txBusyOn=0;releaseEngine();
+    toast('Transcription error: '+((e&&(e.name||e.message))||'unknown'));
+    txRelock();
   });
 }
 function runClip(id,p){
@@ -1481,11 +1500,12 @@ function runClip(id,p){
     return pcmFrom(b);
   }).then(function(a){
     if(a.peak<0.005){
-      txBusy=false;
+      txBusy=false;txBusyOn=0;
       var q=plays.filter(function(x){return x.id===id})[0];
       if(q){q.tx='';q.txRaw='[silent — peak '+a.peak.toFixed(3)+']';dbPut('plays',q).catch(function(){});renderAll()}
       txSet('Play '+(plays.indexOf(q)+1)+' had no audible sound (peak '+a.peak.toFixed(4)+'). Run the mic test below.');
-      pump();return;
+      toast('That clip had no audible sound — check the mic test');
+      releaseEngine();txRelock();pump();return;
     }
     txLast=a;txStart=Date.now();txCur=id;
     clearTimeout(txTimer);
@@ -1493,16 +1513,18 @@ function runClip(id,p){
       /* Nothing came back. Assume the engine is wedged, restart it, move on. */
       var st=plays.filter(function(x){return x.id===txCur})[0];
       if(st){st.tx='';st.txRaw='[timed out after '+(TXLIMIT/1000)+'s]';dbPut('plays',st).catch(function(){});renderAll()}
-      txSet('Timed out after '+(TXLIMIT/1000)+'s. This model is too heavy for this iPad — '+
-            'try a smaller model or q8 precision.');
-      txReset('');txQueue=[];
+      txSet('Timed out after '+(TXLIMIT/1000)+'s.');
+      toast('That clip timed out — try again');
+      txBusyOn=0;txReset('');txQueue=[];txRelock();
     },TXLIMIT);
     txw.postMessage({type:'run',id:id,model:TXMODEL,audio:a.pcm},[a.pcm.buffer]);
   }).catch(function(e){
-    txBusy=false;
+    txBusy=false;txBusyOn=0;
     var pp=plays.filter(function(x){return x.id===id})[0];
-    if(pp){pp.txRaw='[audio error]';renderAll()}
-    pump();
+    if(pp){pp.txRaw='[audio error: '+((e&&(e.name||e.message))||'unknown')+']';
+      dbPut('plays',pp).catch(function(){});}
+    toast('Could not read that clip');
+    releaseEngine();txRelock();pump();
   });
 }
 function txPending(){
