@@ -393,14 +393,15 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
   <div class="sub" style="margin-top:26px">Automatic transcription</div>
   <p style="font-size:13px;color:var(--mute);margin:0 0 9px;line-height:1.5">
-    <b>Experimental on this device.</b> Speech-to-text runs entirely on the iPad, but the speech
-    model is close to the memory ceiling here — running several clips in a row can make Safari
-    reload the app. Transcribe one clip at a time, and leave Auto off unless you have proven it
-    holds. Nothing is lost if it fails: your audio is safe and the Shortcuts route below always works.</p>
+    Speech-to-text runs entirely on the iPad. Download the model once on WiFi, then transcribe
+    from the <b>Log</b> tab — each play has its own <b>Transcribe now</b> button, and only one runs
+    at a time. That is deliberate: the model sits near this iPad's memory ceiling, and running
+    clips back to back is what makes Safari reload the app. Nothing is ever lost if it does —
+    your plays and audio are saved the moment you tap Save.</p>
   <div class="row" style="padding:0 0 8px">
     <button class="mini solid" id="txLoadBtn">Download speech model</button>
-    <button class="mini" id="txAutoBtn">Auto: off</button>
     <button class="mini" id="txAllBtn">Transcribe ONE clip</button>
+    <button class="mini solid" id="txAutoBtn">Auto: on</button>
     <button class="mini" id="txModelBtn">Model: tiny (40MB)</button>
     <button class="mini" id="txDtypeBtn">Precision: fp32</button>
   </div>
@@ -452,7 +453,7 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 
 <script>
 'use strict';
-var BUILD='v37';
+var BUILD='v39';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -503,7 +504,7 @@ function dbKeys(n){return new Promise(function(res,rej){if(NOSTORE||!db)return r
 function dbClear(n){if(NOSTORE||!db)return noStore(undefined);return new Promise(function(res,rej){var r=st(n,'readwrite').clear();r.onsuccess=function(){res()};r.onerror=function(){rej(r.error)}})}
 
 /* ---------------- state ---------------- */
-var S={q:1,drive:1,down:1,dist:10,hash:'M',txAuto:false,txModel:'',txDtype:'',micRelease:false};
+var S={q:1,drive:1,down:1,dist:10,hash:'M',txAuto:true,txModel:'',txDtype:'',micRelease:false};
 var cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
 var plays=[],allPlays=[],pendingClip=null,lastId=null;
 var GAME={id:Date.now(),name:'Game 1',created:Date.now()},games=[GAME],provisional=true;
@@ -859,7 +860,7 @@ function doSave(){
   if(pendingClip)jobs.push(dbPut('clips',pendingClip.blob,id));
   Promise.all(jobs).then(function(){
     plays.push(p);allPlays.push(p);lastId=id;pendingClip=null;
-    if(txAuto&&p.clip)setTimeout(function(){enqueue(p.id)},1200);
+    if(txAuto&&p.clip)setTimeout(function(){enqueue(p.id)},1500);
     advance(p);cur={type:null,side:null,gap:null,lat:null,dep:null,flags:{}};
     saveState();render();drawAll();renderAll();
   }).catch(function(e){toast('Could not save: '+((e&&(e.name||e.message))||'unknown'))});
@@ -1294,7 +1295,7 @@ var TXMODELS=[
 var TXMODEL=TXMODELS[0][0];
 var TXDTYPES=[['fp32','fp32 — accurate, heavy'],['q8','q8 — light, inaccurate'],['q4f16','q4f16 — often fails on Safari']];
 var TXDTYPE='fp32';
-var txw=null,txReady=false,txBusy=false,txQueue=[],txAuto=false,txErr='',txLast=null;
+var txw=null,txReady=false,txBusy=false,txQueue=[],txErr='',txLast=null;
 var txTimer=null,txStart=0,txCur=0,TXLIMIT=45000;
 var lastTouch=0,IDLE=1800,idleTimer=null;
 function txSet(t){var e=$('txStatus');if(e)e.textContent=t}
@@ -1324,6 +1325,7 @@ function txSpawn(){
         txLast.peak.toFixed(2)+'). '+(txQueue.length?txQueue.length+' waiting.':'Done.')+
         (ms>12000?' That is too slow for live use — drop to a smaller model or q8.':''));
       if(txOneShot)releaseEngine();
+      txFaster();markRunning(false);
       txBusy=false;txBusyOn=0;pump();txRelock();
     }
     else if(m.type==='error'){
@@ -1334,6 +1336,7 @@ function txSpawn(){
           dbPut('plays',p2).catch(function(){});renderAll()}
         txSet('Transcription failed: '+String(m.msg||'unknown').slice(0,140));
         if(txOneShot)releaseEngine();
+        txSlower('a clip failed');markRunning(false);
         txBusyOn=0;pump();txRelock();
       }
       else{txErr=m.msg;txSet('Could not load the speech model: '+m.msg);
@@ -1346,7 +1349,26 @@ var txLoading=null,txLoadRes=null,txOneShot=true;
 /* Releasing the engine frees the memory, but Safari does not hand it back
    instantly. Loading the next model straight away stacks two allocations and
    the tab gets killed. Wait between clips. */
-var TXCOOL=4000,txCoolUntil=0,coolTimer=null,lockTimer=null,txBusyOn=0;
+var TXCOOL=6000,TXCOOL_MIN=5000,TXCOOL_MAX=120000;
+var txCoolUntil=0,coolTimer=null,lockTimer=null,txBusyOn=0;
+var txAuto=true,txWins=0,crashedLast=false;
+/* The iPad's real limit is unknown and varies with what else it is doing, so the
+   app finds it by experiment: slow down after any failure, and after a crash
+   mid-run, then creep back up once clips are landing cleanly. The learned pace
+   is remembered, so it improves across games instead of starting over. */
+function txSlower(why){
+  TXCOOL=Math.min(Math.round(TXCOOL*1.7),TXCOOL_MAX);
+  txWins=0;saveTxPace();
+  txSet('Backing off to '+Math.round(TXCOOL/1000)+'s between clips ('+why+').');
+}
+function txFaster(){
+  txWins++;
+  if(txWins>=3&&TXCOOL>TXCOOL_MIN){
+    TXCOOL=Math.max(TXCOOL_MIN,Math.round(TXCOOL*0.85));txWins=0;saveTxPace();
+  }
+}
+function saveTxPace(){dbPut('meta',{cool:TXCOOL,running:false},'txPace').catch(function(){})}
+function markRunning(on){dbPut('meta',{cool:TXCOOL,running:!!on},'txPace').catch(function(){})}
 /* One clip at a time, always. While one is running — or while the iPad is being
    given a moment to reclaim its memory — every Transcribe button is locked. */
 function txLock(){ return txBusy || Date.now()<txCoolUntil }
@@ -1476,8 +1498,12 @@ function pump(){
   var coolLeft=txCoolUntil-Date.now();
   if(coolLeft>0){
     if(!coolTimer)coolTimer=setTimeout(function(){coolTimer=null;pump()},coolLeft+50);
-    txSet('Cooling down '+Math.ceil(coolLeft/1000)+'s before the next clip ('+
-      txQueue.length+' waiting). Keeps the app from running out of memory.');
+    txSet('Next clip in '+Math.ceil(coolLeft/1000)+'s · '+txQueue.length+' waiting · pace '+
+      Math.round(TXCOOL/1000)+'s (set automatically for this iPad).');
+    return;
+  }
+  if(rec||starting||stopping){
+    if(!idleTimer)idleTimer=setTimeout(function(){idleTimer=null;pump()},1200);
     return;
   }
   var quiet=Date.now()-lastTouch;
@@ -1489,7 +1515,7 @@ function pump(){
   var id=txQueue[0],p=plays.filter(function(x){return x.id===id})[0];
   if(!p||!p.clip){txQueue.shift();pump();return}
   txBusy=true;txBusyOn=id;txRelock();
-  txErr='';
+  txErr='';markRunning(true);
   ensureEngine().then(function(ok){
     if(!ok){
       /* The model would not load — almost always the iPad not having handed the
@@ -1497,7 +1523,8 @@ function pump(){
          engine away, and wait longer before the next attempt. */
       txQueue.shift();txBusy=false;txBusyOn=0;
       releaseEngine();
-      txCoolUntil=Date.now()+Math.max(TXCOOL*2,8000);
+      txSlower('the model would not load');
+      txCoolUntil=Date.now()+TXCOOL;markRunning(false);
       var pf=plays.filter(function(x){return x.id===id})[0];
       if(pf){pf.txRaw='[engine would not load — tap Transcribe now again]';
         dbPut('plays',pf).catch(function(){});}
@@ -1534,7 +1561,8 @@ function runClip(id,p){
       var st=plays.filter(function(x){return x.id===txCur})[0];
       if(st){st.tx='';st.txRaw='[timed out after '+(TXLIMIT/1000)+'s]';dbPut('plays',st).catch(function(){});renderAll()}
       txSet('Timed out after '+(TXLIMIT/1000)+'s.');
-      toast('That clip timed out — try again');
+      toast('That clip timed out — slowing down');
+      txSlower('a clip timed out');markRunning(false);
       txBusyOn=0;txReset('');txQueue=[];txRelock();
     },TXLIMIT);
     txw.postMessage({type:'run',id:id,model:TXMODEL,audio:a.pcm},[a.pcm.buffer]);
@@ -1588,6 +1616,16 @@ $('txDtypeBtn').onclick=function(){
   S.txDtype=TXDTYPE;saveState();txDtypeUI();buildMsg();
   txReset('Precision changed. Tap Download speech model to fetch it.');
 };
+function txAutoUI(){
+  var b=$('txAutoBtn');if(!b)return;
+  b.textContent='Auto: '+(txAuto?'on':'off');
+  b.classList.toggle('solid',txAuto);
+}
+$('txAutoBtn').onclick=function(){
+  txAuto=!txAuto;S.txAuto=txAuto;saveState();txAutoUI();
+  if(txAuto){txPending().forEach(enqueue);txSet('Automatic. Clips transcribe when the sideline is quiet.')}
+  else{txQueue=[];txSet('Off. Use Transcribe now on the Log tab.')}
+};
 $('txModelBtn').onclick=function(){
   var i=0,k;
   for(k=0;k<TXMODELS.length;k++)if(TXMODELS[k][0]===TXMODEL)i=k;
@@ -1640,14 +1678,6 @@ $('micTest').onclick=function(){
   });
 };
 $('txLoadBtn').onclick=function(){txLoad()};
-function txAutoUI(){
-  $('txAutoBtn').textContent='Auto: '+(txAuto?'on':'off');
-  $('txAutoBtn').classList.toggle('solid',txAuto);
-}
-$('txAutoBtn').onclick=function(){
-  txAuto=!txAuto; S.txAuto=txAuto; saveState(); txAutoUI();
-  if(txAuto){ if(!txReady&&!txErr)txLoad(); txPending().forEach(enqueue); }
-};
 $('txAllBtn').onclick=function(){
   var q=txPending();
   if(!q.length){txSet('Nothing pending — every clip already has text.');return}
@@ -1837,9 +1867,16 @@ function renderAll(){
   else if(activeTab==='review'){safe(renderReview,'Review');safe(renderGames,'Games')}
 }
 openDB().then(function(){
-  return Promise.all([dbAll('plays'),dbAll('games'),dbGet('meta','state'),dbGet('meta','current')]);
+  return Promise.all([dbAll('plays'),dbAll('games'),dbGet('meta','state'),dbGet('meta','current'),dbGet('meta','txPace')]);
 }).then(function(r){
-  var stored=r[1]||[], preboot=plays.slice();
+  var stored=r[1]||[], preboot=plays.slice(), pace=r[4];
+  if(pace&&pace.cool)TXCOOL=Math.min(Math.max(pace.cool,TXCOOL_MIN),TXCOOL_MAX);
+  if(pace&&pace.running){
+    /* The app was mid-transcription last time it was open, which means it did not
+       finish — almost certainly killed for memory. Take that as evidence and slow down. */
+    TXCOOL=Math.min(Math.round(TXCOOL*2),TXCOOL_MAX);
+    crashedLast=true;
+  }
   allPlays=r[0]||[];
   if(r[2])S=Object.assign(S,r[2]);
   var jobs=[];
@@ -1872,12 +1909,20 @@ openDB().then(function(){
 }).then(function(){
   provisional=false;
   render();drawAll();renderAll();
+  if(S.txAuto!==undefined)txAuto=!!S.txAuto;
+  txAutoUI();
+  if(crashedLast){
+    saveTxPace();
+    txSet('Last session stopped mid-clip, so the pace is now '+Math.round(TXCOOL/1000)+
+          's between clips. Pending clips will transcribe on their own.');
+    toast('Slowed transcription to '+Math.round(TXCOOL/1000)+'s between clips');
+  }
+  if(txAuto)setTimeout(function(){txPending().forEach(enqueue)},2500);
   if(S.txModel)TXMODEL=S.txModel;
   if(S.txDtype)TXDTYPE=S.txDtype;
   txModelUI();txDtypeUI();buildMsg();
   sweepClips();
-  if(S.txAuto){ txAuto=true; txAutoUI(); txLoad(); }
-  else txAutoUI();
+
 });
 
 /* ---------------- storage + offline status ---------------- */
