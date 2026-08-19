@@ -379,10 +379,10 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
 </div></div>
 
 <div class="pane" id="review"><div class="pad">
-  <h2>Review &amp; transcribe</h2>
-  <p class="empty" style="padding:0 0 12px">Play each clip back and type what was called. The text saves to the play and exports with the CSV.</p>
-  <div id="revOut"></div>
-  <div class="sub" style="margin-top:26px">Microphone test</div>
+  <div class="sub" style="margin:0 0 6px">Build</div>
+  <p id="buildLine" style="font-size:13px;color:var(--mute);margin:0 0 20px;line-height:1.45"></p>
+
+<div class="sub" style="margin-top:26px">Microphone test</div>
   <p style="font-size:13px;color:var(--mute);margin:0 0 9px;line-height:1.5">
     Records three seconds and reports exactly what was captured. Use this first if a play comes back silent.</p>
   <div class="row" style="padding:0 0 8px">
@@ -402,8 +402,6 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
     <button class="mini solid" id="txLoadBtn">Download speech model</button>
     <button class="mini" id="txAllBtn">Transcribe ONE clip</button>
     <button class="mini solid" id="txAutoBtn">Auto: on</button>
-    <button class="mini" id="txModelBtn">Model: tiny (40MB)</button>
-    <button class="mini" id="txDtypeBtn">Precision: fp32</button>
   </div>
   <p id="txStatus" style="font-size:12.5px;color:var(--mute);margin:0 0 4px;line-height:1.45">Not started.</p>
 
@@ -433,27 +431,20 @@ input[type=text]{width:100%;padding:11px 10px;font-size:16px;font-family:inherit
   </div>
   <div id="gameList"></div>
 
-  <div class="sub" style="margin-top:26px">Build</div>
-  <p id="buildLine" style="font-size:13px;color:var(--mute);margin:0 0 4px;line-height:1.45"></p>
+    <div class="sub" style="margin-top:26px">Clips &amp; transcriptions</div>
+  <div id="revOut"></div>
 
-  <div class="sub" style="margin-top:22px">Storage</div>
-  <p id="storeStatus" style="font-size:13px;color:var(--mute);margin:0 0 4px;line-height:1.45">Checking…</p>
-
-  <div class="sub" style="margin-top:22px">Offline</div>
-  <p id="swStatus" style="font-size:13px;color:var(--mute);margin:0 0 4px;line-height:1.45">Checking…</p>
-
-  <div class="sub" style="margin-top:22px">Start over</div>
+<div class="sub" style="margin-top:22px">Start over</div>
   <p style="font-size:13px;color:var(--mute);margin:0 0 9px;line-height:1.45">
     Removes every play and clip from the game you are charting now. Other saved games are not touched.
     Export the CSV first if you want to keep it.</p>
   <button class="mini" id="wipeBtn" style="border-color:#C63B22;color:#C63B22">Clear this game's plays</button>
 </div></div>
-
 <div class="toast" id="toast"></div>
 
 <script>
 'use strict';
-var BUILD='v41';
+var BUILD='v42';
 var SVGNS='http://www.w3.org/2000/svg';
 
 /* ---------------- storage ---------------- */
@@ -1286,14 +1277,8 @@ function matchCall(raw){
 }
 
 /* ---------------- transcription queue ---------------- */
-var TXMODELS=[
-  ['onnx-community/whisper-tiny.en','whisper tiny — known good'],
-  ['onnx-community/whisper-base.en','whisper base — may freeze'],
-  ['onnx-community/moonshine-tiny-ONNX','moonshine tiny — may freeze'],
-  ['onnx-community/moonshine-base-ONNX','moonshine base — may freeze']
-];
-var TXMODEL=TXMODELS[0][0];
-var TXDTYPES=[['fp32','fp32 — accurate, heavy'],['q8','q8 — light, inaccurate'],['q4f16','q4f16 — often fails on Safari']];
+/* Settled by testing on the iPad: nothing else loads reliably here. */
+var TXMODEL='onnx-community/whisper-tiny.en';
 var TXDTYPE='fp32';
 var txw=null,txReady=false,txBusy=false,txQueue=[],txErr='',txLast=null;
 var txTimer=null,txStart=0,txCur=0,TXLIMIT=45000;
@@ -1628,27 +1613,12 @@ function clipFiles(){
     }).catch(function(){return null});
   })).then(function(f){return f.filter(Boolean)});
 }
-function txModelUI(){
-  var m=TXMODELS.filter(function(x){return x[0]===TXMODEL})[0];
-  $('txModelBtn').textContent='Model: '+(m?m[1]:'?');
-}
-function txDtypeUI(){
-  var d=TXDTYPES.filter(function(x){return x[0]===TXDTYPE})[0];
-  $('txDtypeBtn').textContent='Precision: '+(d?d[1]:TXDTYPE);
-}
 function txReset(msg){
   releaseEngine();
   if(coolTimer){clearTimeout(coolTimer);coolTimer=null}
   txBusy=false;txErr='';txQueue=[];
   txSet(msg);
 }
-$('txDtypeBtn').onclick=function(){
-  var i=0,k;
-  for(k=0;k<TXDTYPES.length;k++)if(TXDTYPES[k][0]===TXDTYPE)i=k;
-  TXDTYPE=TXDTYPES[(i+1)%TXDTYPES.length][0];
-  S.txDtype=TXDTYPE;saveState();txDtypeUI();buildMsg();
-  txReset('Precision changed. Tap Download speech model to fetch it.');
-};
 function txAutoUI(){
   var b=$('txAutoBtn');if(!b)return;
   b.textContent='Auto: '+(txAuto?'on':'off');
@@ -1658,15 +1628,6 @@ $('txAutoBtn').onclick=function(){
   txAuto=!txAuto;S.txAuto=txAuto;saveState();txAutoUI();
   if(txAuto){txPending().forEach(enqueue);txSet('Automatic. Clips transcribe when the sideline is quiet.')}
   else{txQueue=[];txSet('Off. Use Transcribe now on the Log tab.')}
-};
-$('txModelBtn').onclick=function(){
-  var i=0,k;
-  for(k=0;k<TXMODELS.length;k++)if(TXMODELS[k][0]===TXMODEL)i=k;
-  TXMODEL=TXMODELS[(i+1)%TXMODELS.length][0];
-  S.txModel=TXMODEL;saveState();txModelUI();buildMsg();
-  /* A different model means a fresh worker. The microphone is unrelated. */
-  if(stream&&!streamLive(stream))dropStream();
-  txReset('Switched. Tap Download speech model to fetch it (once, on WiFi).');
 };
 $('micTest').onclick=function(){
   var note=$('micNote');
@@ -1951,35 +1912,26 @@ openDB().then(function(){
     toast('Slowed transcription to '+Math.round(TXCOOL/1000)+'s between clips');
   }
   if(txAuto)setTimeout(function(){txPending().forEach(enqueue)},2500);
-  if(S.txModel)TXMODEL=S.txModel;
-  if(S.txDtype)TXDTYPE=S.txDtype;
-  txModelUI();txDtypeUI();buildMsg();
+  buildMsg();
   sweepClips();
 
 });
 
 /* ---------------- storage + offline status ---------------- */
-function storageNote(){
-  if(!NOSTORE)return 'Saving to this device. Plays and clips survive closing the app.';
-  if(DBERR==='timed out')return 'NOT SAVING. Storage did not respond. Force-quit the app and reopen it; '
-    +'if that does not clear it, restart the iPad. You can keep charting, but nothing survives a reload.';
-  return 'NOT SAVING ('+DBERR+'). This usually means the page was opened as a local file instead of from '
-    +'an https:// address. You can keep charting, but nothing survives a reload.';
-}
 function showWarn(){
   var b=$('warnBar');
-  if(b){
-    b.classList.toggle('hide',!NOSTORE);
-    if(NOSTORE)b.textContent='Nothing is being saved — open the Review tab for details.';
-  }
-  var e=$('storeStatus'); if(e)e.textContent=storageNote();
+  if(!b)return;
+  b.classList.toggle('hide',!NOSTORE);
+  if(NOSTORE)b.textContent='Nothing is being saved — '+
+    (DBERR==='timed out'?'storage did not respond. Force-quit and reopen the app.'
+     :'open this from its https:// address, not a local file.')+' ('+DBERR+')';
 }
-function swMsg(t){var e=$('swStatus');if(e)e.textContent=t}
+function swMsg(t){}
 function buildMsg(){
   var e=$('buildLine');if(!e)return;
-  e.textContent='App build '+BUILD+'. Speech model: '+
-    (TXMODEL.split('/').pop())+' at '+TXDTYPE+'. If this is not the build you just uploaded, '+
-    'close the app fully and reopen it while on WiFi.';
+  e.textContent='App build '+BUILD+' · '+TXMODEL.split('/').pop()+' at '+TXDTYPE+
+    (NOSTORE?' · NOT SAVING ('+DBERR+')':'')+
+    '. If this is not the build you just uploaded, close the app fully and reopen it on WiFi.';
 }
 var SW_READY='Ready. This app opens and runs with no signal — everything is stored on this iPad.';
 if('serviceWorker' in navigator){
